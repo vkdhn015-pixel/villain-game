@@ -23,6 +23,7 @@ const CATEGORIES = [
 const GAMES = [
   { id: 'crash', title: 'Crash', tag: 'crash', icon: 'rocket', color: '#FF6B6B', playable: true, image: require('../../assets/images/crash-bg.png') },
   { id: 'aviator', title: 'Aviator', tag: 'crash', icon: 'airplane', color: '#5B8CFF', playable: true, image: require('../../assets/images/aviator-bg.png') },
+  { id: 'dragon-tiger', title: 'Dragon Tiger', tag: 'cards', icon: 'paw', color: '#D4AF37', playable: true, image: require('../../assets/images/dragon-tiger-bg.png') },
   { id: 'dice', title: 'Lucky Dice', tag: 'dice', icon: 'dice', color: '#FFB020', playable: true, image: require('../../assets/images/dice-bg.png') },
   { id: 'spin', title: 'Spin Wheel', tag: 'spin', icon: 'sync-circle', color: '#2ECA7F', playable: true, image: require('../../assets/images/spin-bg.png') },
   { id: 'andar-bahar', title: 'Andar Bahar', tag: 'cards', icon: 'albums', color: '#4A4A4A', playable: true, image: require('../../assets/images/andar-bg.png') },
@@ -45,9 +46,10 @@ export default function Games() {
   return (
     <ImageBackground
      source={require('../../assets/images/games-bg.png')}
-     style={{ flex: 1 }}
+     style={styles.screen}
+     imageStyle={styles.screenBg}
      resizeMode="cover"
-    >
+   >
       <ImageBackground
        source={require('../../assets/images/header-bg.png')}
        style={styles.header}
@@ -127,6 +129,17 @@ export default function Games() {
 }
 
 const styles = StyleSheet.create({
+  screen: {
+  flex: 1,
+  width: '100%',
+  minWidth: 0,
+  backgroundColor: '#050814',
+},
+
+screenBg: {
+  width: '100%',
+  height: '100%',
+},
   header: { borderBottomLeftRadius: 24, borderBottomRightRadius: 24 },
   headerInner: { paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.xl },
   title: { color: '#fcfbfb', fontSize: 26, fontWeight: '800' },

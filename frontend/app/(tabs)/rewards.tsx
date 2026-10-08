@@ -27,7 +27,8 @@ export default function Rewards() {
   return (
     <ImageBackground
      source={require('../../assets/images/games-bg.png')}
-     style={{ flex: 1 }}
+     style={styles.screen}
+     imageStyle={styles.screenBg}
      resizeMode="cover"
     >
       <ImageBackground
@@ -100,6 +101,17 @@ export default function Rewards() {
 }
 
 const styles = StyleSheet.create({
+  screen: {
+  flex: 1,
+  width: '100%',
+  minWidth: 0,
+  backgroundColor: '#050814',
+},
+
+screenBg: {
+  width: '100%',
+  height: '100%',
+},
   header: { borderBottomLeftRadius: 24, borderBottomRightRadius: 24, paddingBottom: spacing.xxl },
   title: { color: '#fff', fontSize: 24, fontWeight: '800' },
   sub: { color: 'rgba(255,255,255,0.9)', marginTop: 4, fontSize: 13 },

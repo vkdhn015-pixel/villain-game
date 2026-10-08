@@ -54,7 +54,7 @@ export default function Home() {
     <ImageBackground
      source={require('../../assets/images/games-bg.png')}
      style={styles.screen}
-     imageStyle={{height: '100%'}}
+     imageStyle={styles.screenBg}
      resizeMode="cover"
     >
       <ImageBackground
@@ -104,20 +104,24 @@ export default function Home() {
 
             {/* Invisible Deposit Now touch area */}
             <Pressable
-              style={styles.popupDepositHit}
-              onPress={() => {
-                setShowFirstDepositPopup(false);
-                router.push('/deposit');
-              }}
-              accessibilityLabel="Deposit now"
-            />
+  style={styles.popupDepositHit}
+  onPress={() => {
+    setShowFirstDepositPopup(false);
+    router.push('/deposit');
+  }}
+  accessibilityLabel="Deposit now"
+>
+  <Text style={styles.popupDepositText}>DEPOSIT NOW</Text>
+</Pressable>
 
             {/* Invisible Maybe Later touch area */}
             <Pressable
-              style={styles.popupLaterHit}
-              onPress={() => setShowFirstDepositPopup(false)}
-              accessibilityLabel="Maybe later"
-            />
+  style={styles.popupLaterHit}
+  onPress={() => setShowFirstDepositPopup(false)}
+  accessibilityLabel="Maybe later"
+>
+  <Text style={styles.popupLaterText}>Maybe Later</Text>
+</Pressable>
 
           </View>
 
@@ -271,13 +275,14 @@ function GameTile({ game, onPress }: any) {
 }
 
 const styles = StyleSheet.create({
-  screen: {flex: 1, backgroundColor: '#050814'},
+  screen: {flex: 1, width: '100%', minWidth: 0, backgroundColor: '#050814'},
   header: {
   paddingBottom: 20,
   overflow: 'hidden',
   borderBottomLeftRadius: 7,
   borderBottomRightRadius: 7,
 },
+screenBg:{width:'100%', height:'100%'},
   headerInner: { paddingHorizontal: spacing.lg, paddingTop: 15, flexDirection: 'row', alignItems: 'center' },
   avatar: { width: 52, height: 52, borderRadius: 26, backgroundColor: '#c6c8cf', alignItems: 'center', justifyContent: 'center', borderwidth: 2, borderColor: '#42C8FF', shadowColor: '#00B7FF', shadowOpacity: 0.8, shadowRadius: 10, elevation: 8 },
   avatarText: { fontSize: 20, fontWeight: '800', color: '#0F172A' },
@@ -344,7 +349,7 @@ const styles = StyleSheet.create({
 
   depositPopupContainer: {
     width: '100%',
-    maxWidth: 410,
+    maxWidth: 430,
     aspectRatio: 2 / 3,
     position: 'relative',
     alignItems: 'center',
@@ -376,31 +381,61 @@ const styles = StyleSheet.create({
    * PNG me DEPOSIT NOW button ke upar
    * invisible clickable area.
    */
-  popupDepositHit: {
-    position: 'absolute',
-
-    left: '15%',
-    width: '70%',
-
-    top: '81%',
-    height: '9%',
-
-    backgroundColor: 'transparent',
-  },
+ 
 
   /*
    * PNG me Maybe Later ke upar
    * invisible clickable area.
    */
-  popupLaterHit: {
-    position: 'absolute',
 
-    left: '28%',
-    width: '44%',
+  popupDepositHit: {
+  position: 'absolute',
+  left: '15%',
+  width: '70%',
+  top: '77%',
+  height: '9%',
 
-    top: '90%',
-    height: '7%',
+  backgroundColor: 'transparent',
+  borderRadius: 14,
 
-    backgroundColor: 'transparent',
-  },
+  alignItems: 'center',
+  justifyContent: 'center',
+
+  borderWidth: 2,
+  borderColor: '#FFF3A6',
+
+  shadowColor: '#FFD83D',
+  shadowOpacity: 0.8,
+  shadowRadius: 10,
+  elevation: 8,
+},
+
+popupDepositText: {
+  color: '#fff',
+  fontSize: 18,
+  fontWeight: '900',
+},
+
+popupLaterHit: {
+  position: 'absolute',
+  left: '28%',
+  width: '44%',
+  top: '87%',
+  height: '7%',
+
+  backgroundColor: 'transparent',
+  borderRadius: 10,
+
+  alignItems: 'center',
+  justifyContent: 'center',
+
+  borderWidth: 1,
+  borderColor: 'rgba(255,255,255,0.5)',
+},
+
+popupLaterText: {
+  color: '#fff',
+  fontSize: 13,
+  fontWeight: '700',
+},
 });

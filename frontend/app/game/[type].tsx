@@ -5,10 +5,10 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'react-native';
-import Svg, { Path, G, Text as SvgText } from 'react-native-svg';
+import Svg, { Path, G, Circle, Text as SvgText } from 'react-native-svg';
 
 import Animated, {
-  useSharedValue, useAnimatedStyle, withTiming, withSequence, withRepeat, withDelay,
+  useSharedValue, useAnimatedStyle, useAnimatedProps, withTiming, withSequence, withRepeat, withDelay,
   withSpring, Easing, cancelAnimation, FadeInDown, FadeIn, ZoomIn, runOnJS,
 } from 'react-native-reanimated';
 import { colors, spacing, radius, shadows } from '@/src/theme';
@@ -25,6 +25,11 @@ const TITLES: Record<string, { title: string; color: string; icon: any }> = {
   dice: { title: 'Lucky Dice', color: '#FFB020', icon: 'dice' },
   spin: { title: 'Spin Wheel', color: '#2ECA7F', icon: 'sync-circle' },
   'andar-bahar': { title: 'Andar Bahar', color: '#4A4A4A', icon: 'albums' },
+  'dragon-tiger': {
+  title: 'Dragon Tiger',
+  color: '#D4AF37',
+  icon: 'paw'
+},
   teenpatti: { title: 'Teen Patti', color: '#E53935', icon: 'grid' },
   'number-king': { title: 'Number King', color: '#FF7E67', icon: 'apps' },
   plinko: { title: 'Plinko', color: '#FF9A9E', icon: 'game-controller' },
@@ -113,6 +118,38 @@ export default function GameScreen() {
   const [history, setHistory] = useState<Array<{ win: boolean; label: string }>>([]);
   const [flying, setFlying] = useState(false);
   const isCrash = gt === 'crash' || gt === 'aviator';
+  const isDragonTiger = gt === 'dragon-tiger';
+
+const [dtStatus, setDtStatus] =
+  useState<'waiting' | 'revealed'>('waiting');
+
+const [dtTimeLeft, setDtTimeLeft] = useState(5);
+
+const [dtRoundId, setDtRoundId] =
+  useState<string | null>(null);
+
+const [dtDragonCard, setDtDragonCard] =
+  useState<any>(null);
+
+const [dtTigerCard, setDtTigerCard] =
+  useState<any>(null);
+
+const [dtWinner, setDtWinner] =
+  useState<'dragon' | 'tiger' | null>(null);
+
+const [dtPick, setDtPick] =
+  useState<'dragon' | 'tiger' | null>(null);
+
+const [dtBetPlaced, setDtBetPlaced] =
+  useState(false);
+
+const [dtTotalBet, setDtTotalBet] =
+  useState(0);
+
+const [dtPlayers, setDtPlayers] =
+  useState(0);
+
+const dtRoundRef = useRef<string | null>(null);
 
   const multTimer = useRef<any>(null);
   const revealTimer = useRef<any>(null);
@@ -140,6 +177,16 @@ export default function GameScreen() {
   const resultPulse = useSharedValue(1);
   const glowIntensity = useSharedValue(0.3);
   const shake = useSharedValue(0);
+  const dtDragonScale = useSharedValue(1);
+const dtTigerScale = useSharedValue(1);
+
+const dtDragonAnimatedStyle = useAnimatedStyle(() => ({
+  transform: [{ scale: dtDragonScale.value }],
+}));
+
+const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
+  transform: [{ scale: dtTigerScale.value }],
+}));
 
   useEffect(() => {
     api.me().then((m) => setBalance(m?.balance ?? 0));
@@ -196,6 +243,119 @@ export default function GameScreen() {
   }, []);
 
   useEffect(() => () => { clearTimers(); [fly, rotate, diceRot, diceBounce, bgShift, cardFlip, cardDeal1, cardDeal2, cardDeal3, ballDrop, dartFly].forEach(cancelAnimation); }, []);
+
+  useEffect(() => {
+  if (!isDragonTiger) return;
+
+  let mounted = true;
+
+  const pollDragonTiger = async () => {
+    try {
+      const st = await api.dragonTigerLiveState();
+
+      if (!mounted) return;
+
+      // New round
+      if (
+        st.round_id &&
+        st.round_id !== dtRoundRef.current
+      ) {
+        dtRoundRef.current = st.round_id;
+
+        setDtRoundId(st.round_id);
+        setDtBetPlaced(false);
+        setDtPick(null);
+        setDtDragonCard(null);
+        setDtTigerCard(null);
+        setDtWinner(null);
+      }
+      
+
+      setDtStatus(
+        st.status === 'revealed'
+          ? 'revealed'
+          : 'waiting'
+      );
+
+      setDtTimeLeft(
+        Number(st.time_left ?? 0)
+      );
+
+      setDtTotalBet(
+        Number(st.round_total_bet ?? 0)
+      );
+
+      setDtPlayers(
+        Number(st.round_player_count ?? 0)
+      );
+
+      if (st.status === 'waiting') {
+        setDisplay(
+          `BET NOW · ${Number(
+            st.time_left ?? 0
+          ).toFixed(1)}s`
+        );
+        dtDragonScale.value = withSpring(1);
+        dtTigerScale.value = withSpring(1);
+      }
+
+      if (st.status === 'revealed') {
+        setDtDragonCard(
+          st.dragon_card ?? null
+        );
+
+        setDtTigerCard(
+          st.tiger_card ?? null
+        );
+
+        setDtWinner(
+          st.winner ?? null
+        );
+
+        if (st.winner === 'dragon') {
+          dtDragonScale.value = withSpring(1.25);
+          dtTigerScale.value = withSpring(0.85);
+        } else if (st.winner === 'tiger') {
+          dtDragonScale.value = withSpring(0.85);
+          dtTigerScale.value = withSpring(1.25);
+        }
+
+        setDisplay(
+          st.winner === 'dragon'
+            ? '🐉 DRAGON WINS'
+            : '🐯 TIGER WINS'
+        );
+
+        // Refresh wallet after server settlement
+        try {
+          const me = await api.me();
+
+          if (me?.balance != null) {
+            setBalance(me.balance);
+          }
+        } catch {}
+      }
+
+    } catch (error) {
+      console.log(
+        'Dragon Tiger live state error:',
+        error
+      );
+    }
+  };
+
+  pollDragonTiger();
+
+  const timer = setInterval(
+    pollDragonTiger,
+    300
+  );
+
+  return () => {
+    mounted = false;
+    clearInterval(timer);
+  };
+}, [isDragonTiger]);
 
   const finishRound = (res: any, label: string) => {
     setDisplay(label);
@@ -462,7 +622,7 @@ const runAnimationFor = (res: any) => {
 
     xAnimations.push(
       withTiming(x, {
-        duration: 115,
+        duration: 200,
         easing: Easing.out(Easing.quad),
       })
     );
@@ -470,7 +630,7 @@ const runAnimationFor = (res: any) => {
     // Small vertical bounce between pegs.
     yAnimations.push(
       withTiming((i + 1) * 31 - 7, {
-        duration: 115,
+        duration: 200,
         easing: Easing.inOut(Easing.quad),
       })
     );
@@ -479,14 +639,14 @@ const runAnimationFor = (res: any) => {
   // Final correction to exact slot.
   xAnimations.push(
     withTiming(targetX, {
-      duration: 160,
+      duration: 250,
       easing: Easing.out(Easing.quad),
     })
   );
 
   yAnimations.push(
     withTiming(285, {
-      duration: 160,
+      duration: 250,
       easing: Easing.in(Easing.quad),
     })
   );
@@ -628,6 +788,78 @@ const runAnimationFor = (res: any) => {
       setError(e.message || 'Could not start round'); setDisplay('ERROR'); setBusy(false); setFlying(false);
     }
   };
+
+  const placeDragonTigerBet = async (
+  side: 'dragon' | 'tiger'
+) => {
+  if (busy) return;
+
+  if (dtBetPlaced) {
+    setError(
+      'You already placed a bet this round'
+    );
+    return;
+  }
+
+  if (dtStatus !== 'waiting') {
+    setError(
+      'Betting is closed. Wait for next round.'
+    );
+    return;
+  }
+
+  const amount = Number(bet);
+
+  if (!amount || amount <= 0) {
+    setError('Enter a valid bet amount');
+    return;
+  }
+
+  if (amount > balance) {
+    setError('Insufficient balance');
+    return;
+  }
+
+  try {
+    setBusy(true);
+    setError(null);
+
+    const result =
+      await api.dragonTigerBet(
+        amount,
+        side
+      );
+
+    setBalance(
+      Number(result.balance ?? balance)
+    );
+
+    setDtRoundId(
+      result.round_id ?? dtRoundId
+    );
+
+    setDtPick(side);
+    setDtBetPlaced(true);
+
+    setDisplay(
+      `BET PLACED · ${side.toUpperCase()}`
+    );
+
+  } catch (e: any) {
+    console.log(
+      'Dragon Tiger bet error:',
+      e
+    );
+
+    setError(
+      e?.message ||
+      'Could not place bet'
+    );
+
+  } finally {
+    setBusy(false);
+  }
+};
 
   const play = async () => {
     if (busy) return; // prevent duplicate taps
@@ -787,24 +1019,129 @@ runAnimationFor(res);
 
 
   function buildTrailPath(progress: number, width: number, height: number) {
+  'worklet';
+
+  const p = Math.min(1, Math.max(0, progress));
+
   const startX = 24;
   const startY = height - 24;
-  const endX = startX + progress * (width - 80);
-  const endY = startY - progress * (height - 80);
-  const midX = (startX + endX) / 2;
-  const midY = startY - (progress * (height - 80)) * 0.3;
-  return `M ${startX} ${startY} Q ${midX} ${midY} ${endX} ${endY} L ${endX} ${startY} Z`;
+
+  // Center position
+  const centerX = 270;
+  const centerY = 230;
+
+  // Pehle center tak travel
+  const travel = Math.min(p / 0.35, 1);
+
+  const currentX = startX + (centerX - startX) * travel;
+  const currentY = startY + (centerY - startY) * travel;
+  
+  const hoverX =
+    travel >= 1
+     ? Math.sin(p * Math.PI * 6) * 5
+     : 0;
+  
+  const hoverY =
+    travel >= 1
+     ? Math.sin(p * Math.PI * 10) * 10
+     : 0;
+  const midX = (startX + currentX) / 2;
+  const midY = startY - (startY - currentY) * 0.45;
+
+  return `
+    M ${startX} ${startY}
+    Q ${midX} ${midY} ${currentX} ${currentY}
+    L ${currentX} ${startY}
+    L ${startX} ${startY}
+    Z
+  `;
 }
+
+function buildTrailLinePath(progress: number, width: number, height: number) {
+  'worklet';
+
+  const p = Math.min(1, Math.max(0, progress));
+
+  const startX = 24;
+  const startY = height - 24;
+
+  const centerX = 270;
+  const centerY = 230;
+
+  const travel = Math.min(p / 0.35, 1);
+
+  const currentX = startX + (centerX - startX) * travel;
+  const currentY = startY + (centerY - startY) * travel;
+
+  const hoverX =
+    travel >= 1
+     ? Math.sin(p * Math.PI * 6) * 5
+     : 0;
   
-  
-  const flyStyle = useAnimatedStyle(() => ({
+  const hoverY =
+    travel >= 1
+     ? Math.sin(p * Math.PI * 10) * 10
+     : 0;   
+     
+  const midX = (startX + currentX) / 2;
+  const midY = startY - (startY - currentY) * 0.45;
+
+  return `
+    M ${startX} ${startY}
+    Q ${midX} ${midY} ${currentX} ${currentY}
+  `;
+}
+
+const trailFillProps = useAnimatedProps(() => ({
+  d: buildTrailPath(fly.value, 490, 428),
+}));
+
+const trailGlowProps = useAnimatedProps(() => ({
+  d: buildTrailLinePath(fly.value, 490, 428),
+}));
+
+const flyStyle = useAnimatedStyle(() => {
+  const p = Math.min(1, fly.value);
+
+  // 0 → 1 : center tak pahunchna
+  const centerProgress = Math.min(p / 0.35, 1);
+
+  // Center ke around continuous floating
+  const hoverY =
+    centerProgress >= 1
+      ? Math.sin(p * Math.PI * 10) * 10
+      : 0;
+
+  const hoverX =
+    centerProgress >= 1
+      ? Math.sin(p * Math.PI * 6) * 5
+      : 0;
+
+  const rotation =
+    centerProgress >= 1
+      ? Math.sin(p * Math.PI * 10) * 2
+      : -centerProgress * 8;
+
+  return {
     transform: [
-      { translateY: -fly.value * 280 + shake.value },
-      { translateX: fly.value * 315 + shake.value * 0.5 },
-      { rotate: `${-fly.value * 12}deg` },
+      {
+        translateX:
+          centerProgress * 220 +
+          hoverX +
+          shake.value * 0.4,
+      },
+      {
+        translateY:
+          -centerProgress * 150 +
+          hoverY +
+          shake.value,
+      },
+      {
+        rotate: `${rotation}deg`,
+      },
     ],
-    
-  }));
+  };
+});
   const bgStyle = useAnimatedStyle(() => ({ transform: [{ translateX: -bgShift.value * 40 }] }));
   const spinStyle = useAnimatedStyle(() => ({ transform: [{ rotate: `${rotate.value}deg` }] }));
   const diceStyle = useAnimatedStyle(() => ({ transform: [{ translateY: diceBounce.value }, { rotate: `${diceRot.value}deg` }] }));
@@ -896,9 +1233,48 @@ const cardStyle3 = useAnimatedStyle(() => ({
                       style={styles.gameSpaceBackground}
                       resizeMode="cover"
                      />
-                    <Svg width="105%" height="95%" style={{ position: 'absolute' }}>
-                      <Path d={buildTrailPath(fly.value, 490, 428)} fill="rgba(255, 0, 60, 0.35)" />
-                    </Svg>
+                    <Svg
+  width="105%"
+  height="95%"
+  style={{ position: 'absolute' }}
+  pointerEvents="none"
+>
+  {/* Main red flight area */}
+  <AnimatedPath
+    animatedProps={trailFillProps}
+    fill="rgba(255, 0, 60, 0.30)"
+  />
+
+  {/* Strong red glow */}
+  <AnimatedPath
+    animatedProps={trailGlowProps}
+    fill="none"
+    stroke="#FF003C"
+    strokeWidth={18}
+    strokeLinecap="round"
+    opacity={0.20}
+  />
+
+  {/* Bright exhaust line */}
+  <AnimatedPath
+    animatedProps={trailGlowProps}
+    fill="none"
+    stroke="#FF1744"
+    strokeWidth={6}
+    strokeLinecap="round"
+    opacity={1}
+  />
+
+  {/* Hot center line */}
+  <AnimatedPath
+    animatedProps={trailGlowProps}
+    fill="none"
+    stroke="#FF9AA8"
+    strokeWidth={2}
+    strokeLinecap="round"
+    opacity={0.95}
+  />
+</Svg>
                     <Animated.View style={[{ position: 'absolute', bottom: 6, left: 10 }, flyStyle]}>
                       {gt === 'aviator' ? (
                       <Image source={require('../../assets/images/plane.png')} style={{ width: 100, height: 100, resizeMode: 'contain' }} />
@@ -912,47 +1288,507 @@ const cardStyle3 = useAnimatedStyle(() => ({
                   </>
                 )}
 
+                {isDragonTiger && (
+  <View style={styles.dtTable}>
+
+    {/* HEADER */}
+    <View style={styles.dtHeader}>
+
+      <View>
+        <Text style={styles.dtTitle}>
+          DRAGON TIGER
+        </Text>
+
+        <Text style={styles.dtSubtitle}>
+          HIGH CARD WINS • 1.9X
+        </Text>
+      </View>
+
+      <View style={styles.dtTimerBox}>
+
+        <Text style={styles.dtTimerLabel}>
+          {dtStatus === 'waiting'
+            ? 'BETTING'
+            : 'RESULT'}
+        </Text>
+
+        <Text style={styles.dtTimer}>
+          {dtStatus === 'waiting'
+            ? `${Math.max(
+                0,
+                dtTimeLeft
+              ).toFixed(1)}s`
+            : '✓'}
+        </Text>
+
+      </View>
+
+    </View>
+
+
+    {/* CARDS */}
+    <View style={styles.dtCardsRow}>
+
+      {/* DRAGON */}
+      <View
+        style={[
+          styles.dtSide,
+          dtWinner === 'dragon' &&
+            styles.dtWinnerSide,
+        ]}
+      >
+
+        <Text style={styles.dtSideTitle}>
+          🐉 DRAGON
+        </Text>
+
+        <Animated.View
+  style={[
+    styles.dtCharacterBox,
+    dtWinner === 'dragon' && styles.dtWinnerCharacter,
+    dtDragonAnimatedStyle,
+  ]}
+>
+  <Image
+    source={require('../../assets/images/dragon.png')}
+    style={styles.dtDragonImage}
+    resizeMode="contain"
+  />
+</Animated.View>
+
+        <Pressable
+          disabled={
+            dtStatus !== 'waiting' ||
+            dtBetPlaced ||
+            busy
+          }
+          onPress={() =>
+            placeDragonTigerBet(
+              'dragon'
+            )
+          }
+          style={[
+            styles.dtBetButton,
+            styles.dtDragonButton,
+            dtPick === 'dragon' &&
+              styles.dtSelectedButton,
+          ]}
+        >
+
+          <Text style={styles.dtBetText}>
+            {dtPick === 'dragon'
+              ? 'BET PLACED'
+              : 'BET DRAGON'}
+          </Text>
+
+        </Pressable>
+
+      </View>
+
+
+      {/* VS */}
+      <View style={styles.dtVs}>
+        <Text style={styles.dtVsText}>
+          VS
+        </Text>
+      </View>
+
+
+      {/* TIGER */}
+      <View
+        style={[
+          styles.dtSide,
+          dtWinner === 'tiger' &&
+            styles.dtWinnerSide,
+        ]}
+      >
+
+        <Text style={styles.dtSideTitle}>
+          🐯 TIGER
+        </Text>
+
+        <Animated.View
+  style={[
+    styles.dtCharacterBox,
+    dtWinner === 'tiger' && styles.dtWinnerCharacter,
+    dtTigerAnimatedStyle,
+  ]}
+>
+  <Image
+    source={require('../../assets/images/tiger.png')}
+    style={styles.dtTigerImage}
+    resizeMode="contain"
+  />
+</Animated.View>
+
+        <Pressable
+          disabled={
+            dtStatus !== 'waiting' ||
+            dtBetPlaced ||
+            busy
+          }
+          onPress={() =>
+            placeDragonTigerBet(
+              'tiger'
+            )
+          }
+          style={[
+            styles.dtBetButton,
+            styles.dtTigerButton,
+            dtPick === 'tiger' &&
+              styles.dtSelectedButton,
+          ]}
+        >
+
+          <Text style={styles.dtBetText}>
+            {dtPick === 'tiger'
+              ? 'BET PLACED'
+              : 'BET TIGER'}
+          </Text>
+
+        </Pressable>
+
+      </View>
+
+    </View>
+
+
+    {/* RESULT */}
+    {dtStatus === 'revealed' &&
+      dtWinner && (
+        <View
+          style={styles.dtResultBox}
+        >
+
+          <Text
+            style={styles.dtResult}
+          >
+            {dtWinner === 'dragon'
+              ? '🐉 DRAGON WINS'
+              : '🐯 TIGER WINS'}
+          </Text>
+
+          {dtBetPlaced &&
+            dtPick === dtWinner && (
+              <Text
+                style={styles.dtWin}
+              >
+                🎉 YOU WIN • 1.90X
+              </Text>
+            )}
+
+          {dtBetPlaced &&
+            dtPick !== dtWinner && (
+              <Text
+                style={styles.dtLose}
+              >
+                BET LOST
+              </Text>
+            )}
+
+        </View>
+      )}
+
+
+    {/* LIVE STATS */}
+    <View style={styles.dtStats}>
+
+      <Text style={styles.dtStat}>
+        TOTAL ₹{dtTotalBet.toFixed(2)}
+      </Text>
+
+      <Text style={styles.dtStat}>
+        PLAYERS {dtPlayers}
+      </Text>
+
+      <Text style={styles.dtStat}>
+        1.90X
+      </Text>
+
+    </View>
+
+  </View>
+)}
+
                 {gt === 'spin' && (
-                  <View style={{ alignItems: 'center', justifyContent: 'center' }}>
-                    <View style={styles.pointer} />
-                    <View style={styles.wheelShadow}>
-                      <Animated.View style={[{ width: 172, height: 172 }, spinStyle]}>
-                        <Svg width={172} height={172} viewBox="0 0 172 172">
-                          <G>
-                            {SPIN_SEGMENTS.map((m, i) => {
-                              const seg = 360 / SPIN_SEGMENTS.length;
-                              const start = i * seg;
-                              const end = start + seg;
-                              const mid = (start + end) / 2;
-                              const isWin = !busy && winSegIdx === i;
-                              const labelPos = polarToCartesian(86, 86, 55, mid);
-                              return (
-                                <G key={i}>
-                                  <Path
-                                    d={wedgePath(86, 86, 84, start, end)}
-                                    fill={isWin ? '#FFD700' : (i % 2 ? '#FF6B6B' : '#FFB020')}
-                                    stroke="#fff"
-                                    strokeWidth={1.5}
-                                  />
-                                  <SvgText
-                                    x={labelPos.x}
-                                    y={labelPos.y}
-                                    fill="#fff"
-                                    fontSize={14}
-                                    fontWeight="bold"
-                                    textAnchor="middle"
-                                  >
-                                    {m || '×'}
-                                  </SvgText>
-                                </G>
-                              );
-                            })}
-                          </G>
-                        </Svg>
-                      </Animated.View>
-                    </View>
-                  </View>
-                )}
+  <View
+    style={{
+      width: '100%',
+      height: 260,
+      alignItems: 'center',
+      justifyContent: 'center',
+    }}
+  >
+
+    {/* TOP POINTER */}
+    <View
+      style={{
+        position: 'absolute',
+        top: 8,
+        zIndex: 20,
+        alignItems: 'center',
+      }}
+    >
+      <View
+        style={{
+          width: 0,
+          height: 0,
+          borderLeftWidth: 11,
+          borderRightWidth: 11,
+          borderTopWidth: 22,
+          borderLeftColor: 'transparent',
+          borderRightColor: 'transparent',
+          borderTopColor: '#FFFFFF',
+        }}
+      />
+
+      <View
+        style={{
+          width: 34,
+          height: 5,
+          borderRadius: 5,
+          backgroundColor: '#FFD700',
+          marginTop: -2,
+        }}
+      />
+    </View>
+
+    {/* STATUS */}
+    <View
+      style={{
+        position: 'absolute',
+        top: 14,
+        right: 14,
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: 'rgba(0,0,0,0.35)',
+        paddingHorizontal: 9,
+        paddingVertical: 5,
+        borderRadius: 20,
+        zIndex: 10,
+      }}
+    >
+      <View
+        style={{
+          width: 7,
+          height: 7,
+          borderRadius: 4,
+          backgroundColor: busy ? '#FFD700' : '#2ECA7F',
+          marginRight: 6,
+        }}
+      />
+
+      <Text
+        style={{
+          color: '#fff',
+          fontSize: 9,
+          fontWeight: '900',
+          letterSpacing: 0.7,
+        }}
+      >
+        {busy ? 'SPINNING' : 'READY TO SPIN'}
+      </Text>
+    </View>
+
+    {/* OUTER GLOW / RIM */}
+    <View
+      style={{
+        width: 222,
+        height: 222,
+        borderRadius: 111,
+        backgroundColor: '#FFD700',
+        padding: 7,
+        shadowColor: '#FFD700',
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.65,
+        shadowRadius: 14,
+        elevation: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+
+      {/* INNER DARK RIM */}
+      <View
+        style={{
+          width: 208,
+          height: 208,
+          borderRadius: 104,
+          backgroundColor: '#151515',
+          padding: 5,
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+
+        {/* WHEEL */}
+        <Animated.View
+          style={[
+            {
+              width: 198,
+              height: 198,
+              borderRadius: 99,
+              overflow: 'hidden',
+              backgroundColor: '#fff',
+            },
+            spinStyle,
+          ]}
+        >
+
+          <Svg
+            width={198}
+            height={198}
+            viewBox="0 0 198 198"
+          >
+            <G>
+
+              {SPIN_SEGMENTS.map((m, i) => {
+                const seg = 360 / SPIN_SEGMENTS.length;
+                const start = i * seg;
+                const end = start + seg;
+                const mid = (start + end) / 2;
+
+                const isWin =
+                  !busy &&
+                  winSegIdx === i;
+
+                const labelPos =
+                  polarToCartesian(
+                    99,
+                    99,
+                    64,
+                    mid
+                  );
+
+                const wheelColors = [
+                  '#E91E63',
+                  '#FF8A00',
+                  '#7C4DFF',
+                  '#00A8FF',
+                  '#FF3D71',
+                  '#FFB300',
+                  '#00C853',
+                  '#9C27B0',
+                ];
+
+                return (
+                  <G key={`spin-segment-${i}`}>
+
+                    <Path
+                      d={wedgePath(
+                        99,
+                        99,
+                        97,
+                        start,
+                        end
+                      )}
+                      fill={
+                        isWin
+                          ? '#FFD700'
+                          : wheelColors[i % wheelColors.length]
+                      }
+                      stroke="#FFFFFF"
+                      strokeWidth={2}
+                    />
+
+                    <SvgText
+                      x={labelPos.x}
+                      y={labelPos.y}
+                      fill="#FFFFFF"
+                      fontSize={15}
+                      fontWeight="900"
+                      textAnchor="middle"
+                    >
+                      {m === 0 ? 'LOSE' : `${m}x`}
+                    </SvgText>
+
+                  </G>
+                );
+              })}
+
+              {/* CENTER CIRCLE */}
+              <Circle
+                cx="99"
+                cy="99"
+                r="34"
+                fill="#151515"
+                stroke="#FFD700"
+                strokeWidth="5"
+              />
+
+              <Circle
+                cx="99"
+                cy="99"
+                r="25"
+                fill="#252525"
+              />
+
+              <SvgText
+                x="99"
+                y="96"
+                fill="#FFFFFF"
+                fontSize="13"
+                fontWeight="900"
+                textAnchor="middle"
+              >
+                SPIN
+              </SvgText>
+
+              <SvgText
+                x="99"
+                y="111"
+                fill="#FFD700"
+                fontSize="9"
+                fontWeight="900"
+                textAnchor="middle"
+              >
+                & WIN
+              </SvgText>
+
+            </G>
+          </Svg>
+        </Animated.View>
+      </View>
+    </View>
+
+    {/* LAST RESULT */}
+    <View
+      style={{
+        position: 'absolute',
+        bottom: 8,
+        left: 14,
+        backgroundColor: 'rgba(0,0,0,0.45)',
+        borderRadius: 12,
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+      }}
+    >
+      <Text
+        style={{
+          color: 'rgba(255,255,255,0.65)',
+          fontSize: 8,
+          fontWeight: '800',
+        }}
+      >
+        LAST RESULT
+      </Text>
+
+      <Text
+        style={{
+          color: '#FFD700',
+          fontSize: 15,
+          fontWeight: '900',
+          marginTop: 1,
+        }}
+      >
+        {!busy && result?.result?.segment_multiplier
+          ? `${result.result.segment_multiplier}x`
+          : '—'}
+      </Text>
+    </View>
+
+  </View>
+)}
 
                 {gt === 'dice' && (
                   <View style={styles.diceBox}>
@@ -1620,39 +2456,102 @@ const cardStyle3 = useAnimatedStyle(() => ({
     </View>
 
     {/* Bottom slots */}
-    <View style={styles.plinkoSlots}>
-      {[10, 4, 2, 1.2, 0.5, 1.2, 2, 4, 10].map(
-        (m, i) => {
+    {/* Result rows */}
+<View style={styles.plinkoResultRows}>
 
-          const selected =
-            result?.result?.slot === i &&
-            !busy;
+  {/* MULTIPLIER ROW */}
+  <View style={styles.plinkoSlots}>
+    {[10, 4, 2, 1.2, 0.5, 1.2, 2, 4, 10].map(
+      (m, i) => {
 
-          return (
-            <View
-              key={`plinko-slot-${i}`}
+        const selected =
+          result?.result?.slot === i &&
+          !busy;
+
+        return (
+          <View
+            key={`plinko-slot-${i}`}
+            style={[
+              styles.plinkoSlotNew,
+              selected &&
+                styles.plinkoSlotWinner,
+            ]}
+          >
+            <Text
               style={[
-                styles.plinkoSlotNew,
+                styles.plinkoSlotText,
                 selected &&
-                  styles.plinkoSlotWinner,
+                  styles.plinkoSlotWinnerText,
               ]}
             >
-              <Text
-                style={[
-                  styles.plinkoSlotText,
-                  selected &&
-                    styles.plinkoSlotWinnerText,
-                ]}
-              >
-                {m}x
-              </Text>
-            </View>
-          );
-        }
-      )}
-    </View>
-
+              {m}x
+            </Text>
+          </View>
+        );
+      }
+    )}
   </View>
+
+  {/* LOSE ROW */}
+  <View style={styles.plinkoLoseSlots}>
+  {[4, 3, 2, 1.5, 1, 1.5, 2, 3, 4].map(
+    (m, i) => {
+
+      const selected =
+        result?.result?.slot === i &&
+        !busy;
+
+      return (
+        <View
+          key={`plinko-second-slot-${i}`}
+          style={[
+            styles.plinkoLoseSlot,
+            selected &&
+              styles.plinkoLoseSlotActive,
+          ]}
+        >
+          <Text
+            style={[
+              styles.plinkoLoseText,
+              selected &&
+                styles.plinkoLoseTextActive,
+            ]}
+          >
+            {m}x
+          </Text>
+        </View>
+      );
+    }
+  )}
+</View>
+
+ {/* FINAL RESULT */}
+  {!busy && result?.result?.slot !== undefined && (
+    <View style={styles.plinkoFinalResult}>
+      <Text style={styles.plinkoFinalResultLabel}>
+        FINAL
+      </Text>
+
+      <Text style={styles.plinkoFinalResultValue}>
+        {Math.max(
+          0,
+          (
+            [10, 4, 2, 1.2, 0.5, 1.2, 2, 4, 10][
+              Number(result.result.slot)
+            ] -
+            [4, 3, 2, 1.5, 1, 1.5, 2, 3, 4][
+              Number(result.result.slot)
+            ]
+          ).toFixed(2)
+        )}x
+      </Text>
+    </View>
+  )}
+
+
+
+</View>
+</View>
 )}
 
                 {gt === 'mines' && (
@@ -1787,7 +2686,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
           {gt === 'number-king' && (
             <View style={{ marginTop: 12 }}>
-              <Text style={styles.label}>Pick a Number (0-9) · Payout 9x</Text>
+              <Text style={styles.label}>Pick a Number (0-9) · Payout 3x</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
                 {Array.from({ length: 10 }).map((_, n) => (
                   <Pressable key={n} testID={`num-${n}`} disabled={busy} onPress={() => setNumberPick(n)} style={[styles.numBtn, numberPick === n && styles.numBtnA]}>
@@ -2300,7 +3199,7 @@ abWinnerSub: {
   plinkoSlot: { width: 24, height: 26, borderRadius: 6, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
   plinkoBoard: {
   width: '100%',
-  height: 300,
+  height: 400,
   borderRadius: 18,
   backgroundColor: '#07152F',
   borderWidth: 2,
@@ -2470,6 +3369,84 @@ plinkoSlotWinnerText: {
   fontSize: 10,
   fontWeight: '900',
 },
+
+plinkoResultRows: {
+  width: '94%',
+  alignSelf: 'center',
+},
+
+plinkoLoseSlots: {
+  width: '100%',
+  height: 43,
+  flexDirection: 'row',
+  gap: 3,
+  alignItems: 'center',
+  marginTop: 3,
+},
+
+plinkoLoseSlot: {
+  flex: 1,
+  height: 38,
+  borderRadius: 7,
+  backgroundColor: '#3A1720',
+  borderWidth: 1,
+  borderColor: '#71313F',
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+plinkoLoseSlotActive: {
+  backgroundColor: '#FF4D5F',
+  borderColor: '#FF9AA5',
+  transform: [
+    { scale: 1.08 },
+  ],
+  shadowColor: '#FF4D5F',
+  shadowOpacity: 0.9,
+  shadowRadius: 8,
+  elevation: 8,
+},
+
+plinkoLoseText: {
+  color: '#FFB8C0',
+  fontSize: 8,
+  fontWeight: '900',
+  letterSpacing: 0.4,
+},
+
+plinkoLoseTextActive: {
+  color: '#FFFFFF',
+  fontSize: 9,
+  fontWeight: '900',
+},
+plinkoFinalResult: {
+  marginTop: 5,
+  alignSelf: 'center',
+  minWidth: 80,
+  height: 30,
+  paddingHorizontal: 12,
+  borderRadius: 8,
+  backgroundColor: '#FFD000',
+  borderWidth: 1,
+  borderColor: '#FFF2A0',
+  alignItems: 'center',
+  justifyContent: 'center',
+  flexDirection: 'row',
+  gap: 6,
+},
+
+plinkoFinalResultLabel: {
+  color: '#111827',
+  fontSize: 8,
+  fontWeight: '900',
+},
+
+plinkoFinalResultValue: {
+  color: '#111827',
+  fontSize: 13,
+  fontWeight: '900',
+},
+
   plinkoText: { color: '#fff', fontSize: 9, fontWeight: '800' },
   mineTile: { width: 48, height: 48, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
   slot: { width: 60, height: 72, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' },
@@ -2498,4 +3475,212 @@ plinkoSlotWinnerText: {
   cashOutBtn: { minHeight: 56, borderRadius: radius.pill, backgroundColor: '#2ECA7F', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, ...shadows.card },
   cashOutText: { color: '#fff', fontSize: 16, fontWeight: '800', letterSpacing: 0.3 },
   cashOutSub: { color: 'rgba(255,255,255,0.9)', fontSize: 13, fontWeight: '800' },
+
+  dtTable: {
+  width: '100%',
+  borderRadius: 20,
+  backgroundColor: '#082B20',
+  borderWidth: 2,
+  borderColor: '#D4AF37',
+  padding: 12,
+  marginBottom: 12,
+},
+
+dtHeader: {
+  flexDirection: 'row',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  marginBottom: 15,
+},
+
+dtTitle: {
+  color: '#FFD700',
+  fontSize: 18,
+  fontWeight: '900',
+},
+
+dtSubtitle: {
+  color: 'rgba(255,255,255,0.55)',
+  fontSize: 8,
+  fontWeight: '800',
+  marginTop: 3,
+},
+
+dtTimerBox: {
+  minWidth: 68,
+  paddingVertical: 6,
+  paddingHorizontal: 9,
+  borderRadius: 10,
+  backgroundColor: 'rgba(0,0,0,0.3)',
+  alignItems: 'center',
+},
+
+dtTimerLabel: {
+  color: '#AFA58E',
+  fontSize: 8,
+  fontWeight: '800',
+},
+
+dtTimer: {
+  color: '#FFD700',
+  fontSize: 18,
+  fontWeight: '900',
+},
+
+dtCardsRow: {
+  flexDirection: 'row',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+},
+
+dtSide: {
+  width: '42%',
+  alignItems: 'center',
+},
+
+dtWinnerSide: {
+  transform: [
+    { scale: 1.04 },
+  ],
+},
+
+dtSideTitle: {
+  color: '#FFF',
+  fontSize: 13,
+  fontWeight: '900',
+  marginBottom: 8,
+},
+
+dtCard: {
+  width: 88,
+  height: 120,
+  borderRadius: 12,
+  backgroundColor: '#FFF',
+  borderWidth: 2,
+  borderColor: '#D4AF37',
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+dtRank: {
+  fontSize: 31,
+  fontWeight: '900',
+},
+
+dtSuit: {
+  fontSize: 36,
+  fontWeight: '900',
+},
+
+dtQuestion: {
+  color: '#D4AF37',
+  fontSize: 45,
+  fontWeight: '900',
+},
+
+dtBetButton: {
+  width: 94,
+  marginTop: 8,
+  paddingVertical: 9,
+  borderRadius: 9,
+  alignItems: 'center',
+},
+
+dtDragonButton: {
+  backgroundColor: '#9B2525',
+},
+
+dtTigerButton: {
+  backgroundColor: '#A66A18',
+},
+
+dtSelectedButton: {
+  borderWidth: 2,
+  borderColor: '#FFF',
+},
+
+dtBetText: {
+  color: '#FFF',
+  fontSize: 9,
+  fontWeight: '900',
+},
+
+dtVs: {
+  width: 34,
+  height: 34,
+  borderRadius: 17,
+  backgroundColor: '#D4AF37',
+  alignItems: 'center',
+  justifyContent: 'center',
+  marginHorizontal: 4,
+},
+
+dtVsText: {
+  color: '#111',
+  fontSize: 10,
+  fontWeight: '900',
+},
+
+dtResultBox: {
+  marginTop: 12,
+  paddingVertical: 10,
+  borderRadius: 10,
+  backgroundColor: 'rgba(0,0,0,0.25)',
+  alignItems: 'center',
+},
+
+dtResult: {
+  color: '#FFD700',
+  fontSize: 18,
+  fontWeight: '900',
+},
+
+dtWin: {
+  color: '#5CFF9A',
+  fontSize: 11,
+  fontWeight: '900',
+  marginTop: 3,
+},
+
+dtLose: {
+  color: '#FF7373',
+  fontSize: 11,
+  fontWeight: '900',
+  marginTop: 3,
+},
+
+dtStats: {
+  flexDirection: 'row',
+  justifyContent: 'space-between',
+  marginTop: 12,
+  paddingTop: 10,
+  borderTopWidth: 1,
+  borderTopColor: 'rgba(212,175,55,0.25)',
+},
+
+dtStat: {
+  color: 'rgba(255,255,255,0.65)',
+  fontSize: 8,
+  fontWeight: '800',
+},
+dtCharacterBox: {
+  width: 115,
+  height: 125,
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+dtDragonImage: {
+  width: 115,
+  height: 125,
+},
+
+dtTigerImage: {
+  width: 115,
+  height: 125,
+},
+
+dtWinnerCharacter: {
+  zIndex: 10,
+},
 });

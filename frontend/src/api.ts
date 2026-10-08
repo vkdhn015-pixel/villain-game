@@ -56,6 +56,18 @@ export const api = {
   crashStart: (bet_amount: number, game_type: string, auto_cash_out?: number | null) =>
     request('/games/crash/start', { method: 'POST', body: JSON.stringify({ bet_amount, game_type, auto_cash_out }) }),
   liveState: () => request('/games/crash/live-state'),
+  dragonTigerLiveState: () =>
+    request('/games/dragon-tiger/live-state'),
+  dtLiveState: () => 
+    request('/games/dragon-tiger/live-state'),
+  dragonTigerBet: (bet_amount: number, pick: 'dragon' | 'tiger') =>
+    request('/games/dragon-tiger/live-bet', {
+      method: 'POST',
+      body: JSON.stringify({
+        bet_amount,
+        pick,
+      }),
+    }),
   liveBet: (bet_amount: number, auto_cash_out?: number | null) =>
     request('/games/crash/live-bet', { method: 'POST', body: JSON.stringify({ bet_amount, auto_cash_out }) }),
   liveCashout: (round_id: string) =>
@@ -94,6 +106,8 @@ export const api = {
   adminGetPayment: () => request('/admin/payment-config', {}, true),
   adminUpdatePayment: (payload: any) =>
     request('/admin/payment-config', { method: 'PATCH', body: JSON.stringify(payload) }, true),
+  adminGameStats: () => 
+    request('/admin/game-stats', {}, true),
   adminUpdateAppSettings: (payload: any) =>
     request('/admin/app-settings', { method: 'PATCH', body: JSON.stringify(payload) }, true),
   adminBroadcast: (title: string, body: string) =>
