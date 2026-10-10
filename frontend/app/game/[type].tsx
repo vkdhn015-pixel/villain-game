@@ -5,7 +5,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'react-native';
-import Svg, { Path, G, Circle, Text as SvgText } from 'react-native-svg';
+import Svg, { Path, G, Circle, Text as SvgText, Defs, LinearGradient as SvgLinearGradient, Stop } from 'react-native-svg';
 
 import Animated, {
   useSharedValue, useAnimatedStyle, useAnimatedProps, withTiming, withSequence, withRepeat, withDelay,
@@ -18,6 +18,11 @@ import LiveBetFeed from '@/src/components/LiveBetFeed';
 import * as Haptics from 'expo-haptics';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
+
+const TRAIL_START_X = 10;   // Plane Image जितना left
+const TRAIL_START_Y_OFFSET = 6; // Plane Image जितना bottom
+const PLANE_TAIL_OFFSET_X = 18; // plane के अंदर tail कहां है (image के अंदर left से)
+const PLANE_TAIL_OFFSET_Y = 60; // plane के अंदर tail कहां है (image के अंदर top से, 100 height में से)
 
 const TITLES: Record<string, { title: string; color: string; icon: any }> = {
   crash: { title: 'Crash', color: '#FF6B6B', icon: 'rocket' },
@@ -106,6 +111,7 @@ export default function GameScreen() {
 
   const [balance, setBalance] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [stageSize, setStageSize] = useState({ width: 490, height: 428 });
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [display, setDisplay] = useState<string>('READY');
@@ -622,7 +628,7 @@ const runAnimationFor = (res: any) => {
 
     xAnimations.push(
       withTiming(x, {
-        duration: 200,
+        duration: 220,
         easing: Easing.out(Easing.quad),
       })
     );
@@ -1016,41 +1022,37 @@ runAnimationFor(res);
        };
 
   // ---- animated styles ----
+const PLANE_TRAVEL_X = 220;
+const PLANE_TRAVEL_Y = 150;
 
+function getPlanePoint(progress: number, height: number) {
+  'worklet';
+  const p = Math.min(1, Math.max(0, progress));
+  const centerProgress = Math.min(p / 0.35, 1);
+  const hoverX = centerProgress >= 1 ? Math.sin(p * Math.PI * 6) * 5 : 0;
+  const hoverY = centerProgress >= 1 ? Math.sin(p * Math.PI * 10) * 10 : 0;
+
+  const baseX = TRAIL_START_X + PLANE_TAIL_OFFSET_X;
+  const baseY = height - TRAIL_START_Y_OFFSET - PLANE_TAIL_OFFSET_Y;
+
+  const x = baseX + centerProgress * PLANE_TRAVEL_X + hoverX;
+  const y = baseY - centerProgress * PLANE_TRAVEL_Y - hoverY;
+
+  return { x, y, centerProgress, hoverX, hoverY };
+}
 
   function buildTrailPath(progress: number, width: number, height: number) {
   'worklet';
+  const startX = TRAIL_START_X + PLANE_TAIL_OFFSET_X;
+  const startY = height - TRAIL_START_Y_OFFSET;
+  const { x: currentX, y: currentY } = getPlanePoint(progress, height);
 
-  const p = Math.min(1, Math.max(0, progress));
-
-  const startX = 24;
-  const startY = height - 24;
-
-  // Center position
-  const centerX = 270;
-  const centerY = 230;
-
-  // Pehle center tak travel
-  const travel = Math.min(p / 0.35, 1);
-
-  const currentX = startX + (centerX - startX) * travel;
-  const currentY = startY + (centerY - startY) * travel;
-  
-  const hoverX =
-    travel >= 1
-     ? Math.sin(p * Math.PI * 6) * 5
-     : 0;
-  
-  const hoverY =
-    travel >= 1
-     ? Math.sin(p * Math.PI * 10) * 10
-     : 0;
-  const midX = (startX + currentX) / 2;
-  const midY = startY - (startY - currentY) * 0.45;
+  const controlX = currentX;
+  const controlY = startY;
 
   return `
     M ${startX} ${startY}
-    Q ${midX} ${midY} ${currentX} ${currentY}
+    Q ${controlX} ${controlY} ${currentX} ${currentY}
     L ${currentX} ${startY}
     L ${startX} ${startY}
     Z
@@ -1059,37 +1061,14 @@ runAnimationFor(res);
 
 function buildTrailLinePath(progress: number, width: number, height: number) {
   'worklet';
+  const startX = TRAIL_START_X + PLANE_TAIL_OFFSET_X;
+  const startY = height - TRAIL_START_Y_OFFSET;
+  const { x: currentX, y: currentY } = getPlanePoint(progress, height);
 
-  const p = Math.min(1, Math.max(0, progress));
+  const controlX = currentX;
+  const controlY = startY;
 
-  const startX = 24;
-  const startY = height - 24;
-
-  const centerX = 270;
-  const centerY = 230;
-
-  const travel = Math.min(p / 0.35, 1);
-
-  const currentX = startX + (centerX - startX) * travel;
-  const currentY = startY + (centerY - startY) * travel;
-
-  const hoverX =
-    travel >= 1
-     ? Math.sin(p * Math.PI * 6) * 5
-     : 0;
-  
-  const hoverY =
-    travel >= 1
-     ? Math.sin(p * Math.PI * 10) * 10
-     : 0;   
-     
-  const midX = (startX + currentX) / 2;
-  const midY = startY - (startY - currentY) * 0.45;
-
-  return `
-    M ${startX} ${startY}
-    Q ${midX} ${midY} ${currentX} ${currentY}
-  `;
+  return `M ${startX} ${startY} Q ${controlX} ${controlY} ${currentX} ${currentY}`;
 }
 
 const trailFillProps = useAnimatedProps(() => ({
@@ -1102,43 +1081,14 @@ const trailGlowProps = useAnimatedProps(() => ({
 
 const flyStyle = useAnimatedStyle(() => {
   const p = Math.min(1, fly.value);
-
-  // 0 → 1 : center tak pahunchna
-  const centerProgress = Math.min(p / 0.35, 1);
-
-  // Center ke around continuous floating
-  const hoverY =
-    centerProgress >= 1
-      ? Math.sin(p * Math.PI * 10) * 10
-      : 0;
-
-  const hoverX =
-    centerProgress >= 1
-      ? Math.sin(p * Math.PI * 6) * 5
-      : 0;
-
-  const rotation =
-    centerProgress >= 1
-      ? Math.sin(p * Math.PI * 10) * 2
-      : -centerProgress * 8;
+  const { centerProgress, hoverX, hoverY } = getPlanePoint(p, 428);
+  const rotation = centerProgress >= 1 ? Math.sin(p * Math.PI * 10) * 2 : -centerProgress * 8;
 
   return {
     transform: [
-      {
-        translateX:
-          centerProgress * 220 +
-          hoverX +
-          shake.value * 0.4,
-      },
-      {
-        translateY:
-          -centerProgress * 150 +
-          hoverY +
-          shake.value,
-      },
-      {
-        rotate: `${rotation}deg`,
-      },
+      { translateX: centerProgress * PLANE_TRAVEL_X + hoverX + shake.value * 0.4 },
+      { translateY: -centerProgress * PLANE_TRAVEL_Y + hoverY + shake.value },
+      { rotate: `${rotation}deg` },
     ],
   };
 });
@@ -1233,53 +1183,28 @@ const cardStyle3 = useAnimatedStyle(() => ({
                       style={styles.gameSpaceBackground}
                       resizeMode="cover"
                      />
-                    <Svg
-  width="105%"
-  height="95%"
-  style={{ position: 'absolute' }}
-  pointerEvents="none"
->
-  {/* Main red flight area */}
-  <AnimatedPath
-    animatedProps={trailFillProps}
-    fill="rgba(255, 0, 60, 0.30)"
-  />
+                  {liveStatus !== 'waiting' && (   
+                    <Svg width="109%" height="97%" style={{ position: 'absolute' }} pointerEvents="none">
+  <Defs>
+    <SvgLinearGradient id="trailFade" x1="0%" y1="100%" x2="100%" y2="0%">
+      <Stop offset="0%" stopColor="#FF003C" stopOpacity={0.5} />
+      <Stop offset="100%" stopColor="#FF003C" stopOpacity={0.08} />
+    </SvgLinearGradient>
+  </Defs>
 
-  {/* Strong red glow */}
-  <AnimatedPath
-    animatedProps={trailGlowProps}
-    fill="none"
-    stroke="#FF003C"
-    strokeWidth={18}
-    strokeLinecap="round"
-    opacity={0.20}
-  />
+  <AnimatedPath animatedProps={trailFillProps} fill="url(#trailFade)" />
 
-  {/* Bright exhaust line */}
-  <AnimatedPath
-    animatedProps={trailGlowProps}
-    fill="none"
-    stroke="#FF1744"
-    strokeWidth={6}
-    strokeLinecap="round"
-    opacity={1}
-  />
-
-  {/* Hot center line */}
-  <AnimatedPath
-    animatedProps={trailGlowProps}
-    fill="none"
-    stroke="#FF9AA8"
-    strokeWidth={2}
-    strokeLinecap="round"
-    opacity={0.95}
-  />
+  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#FF003C" strokeWidth={22} strokeLinecap="round" opacity={0.2} />
+  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#a80210" strokeWidth={6} strokeLinecap="round" opacity={1} />
+  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#f80324" strokeWidth={8} strokeLinecap="round" opacity={0.95} />
 </Svg>
-                    <Animated.View style={[{ position: 'absolute', bottom: 6, left: 10 }, flyStyle]}>
+                  )}
+
+                    <Animated.View style={[{ position: 'absolute', bottom: 6, left: 10, }, flyStyle]}>
                       {gt === 'aviator' ? (
                       <Image source={require('../../assets/images/plane.png')} style={{ width: 100, height: 100, resizeMode: 'contain' }} />
                     ) : gt === 'crash' ? (
-                      <Image source={require('../../assets/images/rocket.png')} style={{ width: 82, height: 82, resizeMode: 'contain' }} />
+                      <Image source={require('../../assets/images/rocket.png')} style={{ width: 100, height: 100, resizeMode: 'contain' }} />
                     ) : (
                       <Ionicons name={meta.icon} size={72} color="#fff" />
                     )}
@@ -2812,7 +2737,7 @@ const styles = StyleSheet.create({
   zIndex: 0,
 },
 crashAviatorStage: {
-  minHeight: 420,
+  minHeight: 428,
 },
   
   tpTable: {
