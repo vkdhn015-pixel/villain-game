@@ -436,161 +436,56 @@ async def live_round_loop():
             logger.error(f"live_round_loop error: {e}")
             await asyncio.sleep(2) 
 
-DT_WAIT_SECONDS = 20
+DT_WAIT_SECONDS = 15
 DT_RESULT_PAUSE_SECONDS = 4
 
 
 async def dragon_tiger_loop():
-    """One shared Dragon Tiger round; publish the result only after settlement."""
+    """Global Dragon Tiger round — same style as crash live round."""
     while True:
         try:
             round_id = new_id()
             wait_ends = datetime.now(timezone.utc) + timedelta(seconds=DT_WAIT_SECONDS)
             await db.dt_live.update_one(
                 {"id": "live"},
-                {"$set": {
-                    "id": "live", "round_id": round_id, "status": "waiting",
-                    "wait_ends_at": wait_ends.isoformat(), "dragon_card": None,
-                    "tiger_card": None, "winner": None,
-                }},
+                {"$set": {"id": "live", "round_id": round_id, "status": "waiting", "wait_ends_at": wait_ends.isoformat()}},
                 upsert=True,
             )
             await asyncio.sleep(DT_WAIT_SECONDS)
 
-            # 2 is lowest; Ace is highest. Ties are redrawn in this game.
+            win_rate = await get_win_rate("dragon-tiger")
+            # Dragon Tiger rank order: 2 is lowest and Ace is highest.
+            # Keep this order local to Dragon Tiger so other games are unchanged.
             dt_rank_order = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
             rank_values = {rank: value for value, rank in enumerate(dt_rank_order, start=2)}
+
             dragon_card = random_card()
             tiger_card = random_card()
             while dragon_card["rank"] == tiger_card["rank"]:
                 tiger_card = random_card()
-            winner = "dragon" if rank_values[dragon_card["rank"]] > rank_values[tiger_card["rank"]] else "tiger"
 
-            # Settle each accepted bet first. A bet's settled flag prevents duplicate credits.
+            dragon_value = rank_values[dragon_card["rank"]]
+            tiger_value = rank_values[tiger_card["rank"]]
+            winner = "dragon" if dragon_value > tiger_value else "tiger"
+
+            await db.dt_live.update_one(
+                {"id": "live"},
+                {"$set": {"status": "revealed", "dragon_card": dragon_card, "tiger_card": tiger_card, "winner": winner}},
+            )
+
             bets = await db.dt_live_bets.find({"round_id": round_id}).to_list(10000)
             for b in bets:
-                won = str(b.get("pick", "")).lower() == winner
-                payout = round(float(b.get("bet", 0)) * 1.9, 2) if won else 0.0
-                claimed = await db.dt_live_bets.update_one(
-                    {"id": b["id"], "settled": {"$ne": True}},
-                    {"$set": {"settled": True, "win": won, "payout": payout, "winner": winner, "settled_at": now_iso()}},
-                )
-                if claimed.modified_count and payout > 0:
+                win = b["pick"] == winner
+                payout = round(b["bet"] * 1.9, 2) if win else 0.0
+                if payout > 0:
                     await db.users.update_one({"id": b["user_id"]}, {"$inc": {"balance": payout}})
-                    await add_transaction(b["user_id"], "win", payout, {"game": "dragon-tiger", "winner": winner, "round_id": round_id})
+                    await add_transaction(b["user_id"], "win", payout, {"game": "dragon-tiger", "winner": winner})
+                await db.dt_live_bets.update_one({"id": b["id"]}, {"$set": {"settled": True, "win": win, "payout": payout}})
 
-            # UI is not allowed to show a winner until every bet is settled and wallet credit is done.
-            await db.dt_live.update_one(
-                {"id": "live", "round_id": round_id},
-                {"$set": {"status": "revealed", "dragon_card": dragon_card, "tiger_card": tiger_card, "winner": winner, "revealed_at": now_iso()}},
-            )
             await asyncio.sleep(DT_RESULT_PAUSE_SECONDS)
         except Exception as e:
-            logger.exception(f"dragon_tiger_loop error: {e}")
-            await asyncio.sleep(2)
-
-
-@api.get("/games/dragon-tiger/live-state")
-async def dragon_tiger_live_state(authorization: Optional[str] = Header(None)):
-    """Live round plus only the authenticated user's own bet settlement."""
-    live = await db.dt_live.find_one({"id": "live"}, {"_id": 0})
-    if not live:
-        return {"status": "waiting", "time_left": DT_WAIT_SECONDS, "round_id": None,
-                "round_total_bet": 0.0, "round_player_count": 0, "my_bet": None}
-
-    round_id = live.get("round_id")
-    bets = await db.dt_live_bets.find({"round_id": round_id}, {"_id": 0, "bet": 1, "user_id": 1}).to_list(10000)
-    total = round(sum(float(b.get("bet", 0)) for b in bets), 2)
-    state = {
-        "status": live.get("status", "waiting"), "round_id": round_id,
-        "round_total_bet": total, "round_player_count": len({b.get("user_id") for b in bets}),
-        "dragon_card": live.get("dragon_card"), "tiger_card": live.get("tiger_card"),
-        "winner": live.get("winner"), "my_bet": None,
-    }
-    if live.get("status") == "waiting":
-        try:
-            ends = datetime.fromisoformat(live["wait_ends_at"].replace("Z", "+00:00"))
-            state["time_left"] = round(max(0.0, (ends - datetime.now(timezone.utc)).total_seconds()), 1)
-        except (KeyError, ValueError, TypeError):
-            state["time_left"] = 0
-    else:
-        state["time_left"] = 0
-
-    # Optional auth keeps the public table view usable, but personal results are never shared.
-    user_id = None
-    if authorization and authorization.startswith("Bearer "):
-        try:
-            token_data = jwt.decode(authorization.split(" ", 1)[1], JWT_SECRET, algorithms=[JWT_ALGO])
-            if token_data.get("role") == "user":
-                user_id = token_data.get("sub")
-        except jwt.PyJWTError:
-            user_id = None
-    if user_id and round_id:
-        mine = await db.dt_live_bets.find_one({"round_id": round_id, "user_id": user_id}, {"_id": 0})
-        if mine:
-            state["my_bet"] = {
-                "pick": mine.get("pick"), "bet": mine.get("bet"),
-                "settled": bool(mine.get("settled", False)),
-                "win": bool(mine.get("win", False)) if mine.get("settled") else None,
-                "payout": float(mine.get("payout", 0)) if mine.get("settled") else None,
-            }
-    return state
-
-
-@api.post("/games/dragon-tiger/bet")
-async def dragon_tiger_live_bet(payload: Dict[str, Any], user=Depends(get_current_user)):
-    """Fast, round-locked Dragon Tiger bet placement; only one bet per user per round."""
-    try:
-        amount = round(float(payload.get("bet_amount", payload.get("amount", 0))), 2)
-    except (TypeError, ValueError):
-        raise HTTPException(400, "Enter a valid bet amount")
-    pick = str(payload.get("pick", payload.get("side", ""))).lower()
-    if amount <= 0:
-        raise HTTPException(400, "Bet must be positive")
-    if pick not in ("dragon", "tiger"):
-        raise HTTPException(400, "Pick dragon or tiger")
-
-    live = await db.dt_live.find_one({"id": "live"}, {"_id": 0})
-    if not live or live.get("status") != "waiting":
-        raise HTTPException(400, "Betting is closed. Wait for the next round.")
-    round_id = live.get("round_id")
-    if not round_id:
-        raise HTTPException(503, "Round is starting. Try again.")
-
-    existing = await db.dt_live_bets.find_one({"round_id": round_id, "user_id": user["id"]}, {"_id": 0})
-    if existing:
-        raise HTTPException(400, "You already placed a bet this round")
-
-    # Atomic balance check/deduction avoids stale balance and duplicate overspending.
-    debit = await db.users.update_one(
-        {"id": user["id"], "balance": {"$gte": amount}},
-        {"$inc": {"balance": -amount, "total_wagered": amount}},
-    )
-    if not debit.modified_count:
-        raise HTTPException(400, "Insufficient balance")
-
-    bet_doc = {
-        "id": new_id(), "round_id": round_id, "user_id": user["id"],
-        "pick": pick, "bet": amount, "settled": False, "win": None,
-        "payout": 0.0, "created_at": now_iso(),
-    }
-    try:
-        # Recheck after debit so a round that just closed cannot accept a late bet.
-        latest = await db.dt_live.find_one({"id": "live"}, {"_id": 0, "round_id": 1, "status": 1})
-        if not latest or latest.get("round_id") != round_id or latest.get("status") != "waiting":
-            await db.users.update_one({"id": user["id"]}, {"$inc": {"balance": amount, "total_wagered": -amount}})
-            raise HTTPException(400, "Betting just closed. Your bet amount was returned.")
-        await db.dt_live_bets.insert_one(bet_doc)
-        await add_transaction(user["id"], "bet", -amount, {"game": "dragon-tiger", "pick": pick, "round_id": round_id})
-    except HTTPException:
-        raise
-    except Exception:
-        await db.users.update_one({"id": user["id"]}, {"$inc": {"balance": amount, "total_wagered": -amount}})
-        raise HTTPException(500, "Could not place bet. Amount returned if it was deducted.")
-
-    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0, "balance": 1})
-    return {"success": True, "round_id": round_id, "pick": pick, "bet": amount,
-            "balance": float((fresh or {}).get("balance", 0)), "settled": False}
+            logger.error(f"dragon_tiger_loop error: {e}")
+            await asyncio.sleep(2)       
 
 
 async def add_transaction(user_id: str, kind: str, amount: float, meta: dict, status: str = "completed") -> dict:
