@@ -436,8 +436,8 @@ async def live_round_loop():
             logger.error(f"live_round_loop error: {e}")
             await asyncio.sleep(2) 
 
-DT_WAIT_SECONDS = 15
-DT_RESULT_PAUSE_SECONDS = 4
+DT_WAIT_SECONDS = 10
+DT_RESULT_PAUSE_SECONDS = 5
 
 
 async def dragon_tiger_loop():
@@ -454,19 +454,12 @@ async def dragon_tiger_loop():
             await asyncio.sleep(DT_WAIT_SECONDS)
 
             win_rate = await get_win_rate("dragon-tiger")
-            # Dragon Tiger rank order: 2 is lowest and Ace is highest.
-            # Keep this order local to Dragon Tiger so other games are unchanged.
-            dt_rank_order = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
-            rank_values = {rank: value for value, rank in enumerate(dt_rank_order, start=2)}
-
+            rank_values = {r: i for i, r in enumerate(DECK_RANKS, start=1)}
             dragon_card = random_card()
             tiger_card = random_card()
-            while dragon_card["rank"] == tiger_card["rank"]:
+            while rank_values[tiger_card["rank"]] == rank_values[dragon_card["rank"]]:
                 tiger_card = random_card()
-
-            dragon_value = rank_values[dragon_card["rank"]]
-            tiger_value = rank_values[tiger_card["rank"]]
-            winner = "dragon" if dragon_value > tiger_value else "tiger"
+            winner = "dragon" if rank_values[dragon_card["rank"]] > rank_values[tiger_card["rank"]] else "tiger"
 
             await db.dt_live.update_one(
                 {"id": "live"},
@@ -937,13 +930,38 @@ async def play_game(payload: PlayGameIn, user=Depends(get_current_user)):
     elif gt == "number-king":
         pick = int(payload.params.get("number", 5)); pick = max(0, min(9, pick))
         roll = pick if is_win else random.choice([n for n in range(10) if n != pick])
-        if is_win: payout = payload.bet_amount * 9.0
-        result_meta.update({"pick": pick, "roll": roll, "multiplier": 9.0})
+        if is_win: payout = payload.bet_amount * 3.0
+        result_meta.update({"pick": pick, "roll": roll, "multiplier": 3.0})
     elif gt == "plinko":
-        slots = [10, 4, 2, 1.2, 0.5, 1.2, 2, 4, 10]
-        idx = random.choice([i for i, m in enumerate(slots) if (m > 1 if is_win else m <= 1)])
-        if is_win: payout = payload.bet_amount * slots[idx]
-        result_meta.update({"slot": idx, "multiplier": slots[idx]})
+        upper_slots = [10, 4, 2, 1.2, 0.5, 1.2, 2, 4, 10]
+        lower_slots = [4, 3, 2, 1.5, 1, 1.5, 2, 3, 4]
+
+        # Same position is used for both rows
+        idx = random.randint(0, len(upper_slots) - 1)
+
+        upper_multiplier = upper_slots[idx]
+        lower_multiplier = lower_slots[idx]
+
+        # Final result = Upper - Lower
+        final_multiplier = round(
+            upper_multiplier - lower_multiplier,
+            2
+        )
+
+        # Never allow negative payout
+        if final_multiplier < 0:
+            final_multiplier = 0
+
+        if is_win and final_multiplier > 0:
+            payout = payload.bet_amount * final_multiplier
+
+        result_meta.update({
+            "slot": idx,
+            "upper_multiplier": upper_multiplier,
+            "lower_multiplier": lower_multiplier,
+            "multiplier": final_multiplier,
+            "final_multiplier": final_multiplier,
+    })
     elif gt == "mines":
         picks = int(payload.params.get("picks", 3)); picks = max(1, min(5, picks))
         multiplier = round(1.0 + picks * 0.6, 2)
@@ -1196,7 +1214,77 @@ async def crash_live_cashout(payload: LiveCashoutIn, user=Depends(get_current_us
     await add_transaction(user["id"], "win", payout, {"game": "crash-live", "multiplier": effective})
     await db.crash_live_bets.update_one({"id": bet_doc["id"]}, {"$set": {"cashed_out": True, "outcome": "cashed", "cash_multiplier": effective}})
     fresh = clean(await db.users.find_one({"id": user["id"]}))
-    return {"win": True, "crashed": False, "multiplier": effective, "payout": payout, "balance": fresh["balance"]}        
+    return {"win": True, "crashed": False, "multiplier": effective, "payout": payout, "balance": fresh["balance"]}
+
+class DtLiveBetIn(BaseModel):
+    bet_amount: float
+    pick: str  # dragon | tiger
+
+
+@api.get("/games/dragon-tiger/live-state")
+async def dt_live_state():
+    """Public — anyone can poll this to see the current global Dragon Tiger round."""
+    live = await db.dt_live.find_one({"id": "live"}, {"_id": 0})
+    if not live:
+        return {"status": "waiting", "time_left": DT_WAIT_SECONDS, "round_total_bet": 0.0, "round_player_count": 0}
+
+    round_id = live["round_id"]
+    bets = await db.dt_live_bets.find({"round_id": round_id}, {"_id": 0, "bet": 1}).to_list(10000)
+    round_total_bet = round(sum(b["bet"] for b in bets), 2)
+    round_player_count = len(bets)
+
+    status = live["status"]
+    if status == "waiting":
+        wait_ends = datetime.fromisoformat(live["wait_ends_at"])
+        time_left = max(0, (wait_ends - datetime.now(timezone.utc)).total_seconds())
+        return {"status": "waiting", "time_left": round(time_left, 1), "round_id": round_id, "round_total_bet": round_total_bet, "round_player_count": round_player_count}
+
+    if status == "revealed":
+        return {
+            "status": "revealed",
+            "round_id": round_id,
+            "dragon_card": live.get("dragon_card"),
+            "tiger_card": live.get("tiger_card"),
+            "winner": live.get("winner"),
+            "round_total_bet": round_total_bet,
+            "round_player_count": round_player_count,
+        }
+
+    return {"status": "waiting", "time_left": DT_WAIT_SECONDS, "round_total_bet": 0.0, "round_player_count": 0}
+
+
+@api.post("/games/dragon-tiger/live-bet")
+async def dt_live_bet(payload: DtLiveBetIn, user=Depends(get_current_user)):
+    live = await db.dt_live.find_one({"id": "live"})
+    if not live or live["status"] != "waiting":
+        raise HTTPException(400, "Betting is closed. Wait for the next round.")
+    if payload.pick not in ("dragon", "tiger"):
+        raise HTTPException(400, "Pick must be dragon or tiger")
+
+    bet = payload.bet_amount
+    if bet <= 0:
+        raise HTTPException(400, "Bet must be positive")
+    if bet > user["balance"]:
+        raise HTTPException(400, "Insufficient balance")
+
+    existing = await db.dt_live_bets.find_one({"round_id": live["round_id"], "user_id": user["id"]})
+    if existing:
+        raise HTTPException(400, "You already placed a bet for this round")
+
+    await db.users.update_one({"id": user["id"]}, {"$inc": {"balance": -bet, "total_wagered": bet}})
+    await add_transaction(user["id"], "bet", -bet, {"game": "dragon-tiger"})
+
+    await db.dt_live_bets.insert_one({
+        "id": new_id(),
+        "round_id": live["round_id"],
+        "user_id": user["id"],
+        "bet": bet,
+        "pick": payload.pick,
+        "settled": False,
+        "created_at": now_iso(),
+    })
+    fresh = clean(await db.users.find_one({"id": user["id"]}))
+    return {"success": True, "balance": fresh["balance"], "round_id": live["round_id"]}            
 
 # =========================================================
 # LIVE BET FEED (recent wins across players)
