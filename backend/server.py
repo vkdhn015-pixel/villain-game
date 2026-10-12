@@ -436,8 +436,8 @@ async def live_round_loop():
             logger.error(f"live_round_loop error: {e}")
             await asyncio.sleep(2) 
 
-DT_WAIT_SECONDS = 10
-DT_RESULT_PAUSE_SECONDS = 5
+DT_WAIT_SECONDS = 20
+DT_RESULT_PAUSE_SECONDS = 10
 
 
 async def dragon_tiger_loop():
