@@ -21,8 +21,8 @@ const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 const TRAIL_START_X = 10;   // Plane Image जितना left
 const TRAIL_START_Y_OFFSET = 6; // Plane Image जितना bottom
-const PLANE_TAIL_OFFSET_X = 18; // plane के अंदर tail कहां है (image के अंदर left से)
-const PLANE_TAIL_OFFSET_Y = 60; // plane के अंदर tail कहां है (image के अंदर top से, 100 height में से)
+const PLANE_TAIL_OFFSET_X = 10; // plane के अंदर tail कहां है (image के अंदर left से)
+const PLANE_TAIL_OFFSET_Y = 25; // plane के अंदर tail कहां है (image के अंदर top से, 100 height में से)
 
 const TITLES: Record<string, { title: string; color: string; icon: any }> = {
   crash: { title: 'Crash', color: '#FF6B6B', icon: 'rocket' },
@@ -129,7 +129,7 @@ export default function GameScreen() {
 const [dtStatus, setDtStatus] =
   useState<'waiting' | 'revealed'>('waiting');
 
-const [dtTimeLeft, setDtTimeLeft] = useState(5);
+const [dtTimeLeft, setDtTimeLeft] = useState(20);
 
 const [dtRoundId, setDtRoundId] =
   useState<string | null>(null);
@@ -149,6 +149,11 @@ const [dtPick, setDtPick] =
 const [dtBetPlaced, setDtBetPlaced] =
   useState(false);
 
+const [dtBetSubmitting, setDtBetSubmitting] = useState(false);
+const [dtMyBetSettled, setDtMyBetSettled] = useState(false);
+const [dtMyBetWin, setDtMyBetWin] = useState<boolean | null>(null);
+const [dtMyBetPayout, setDtMyBetPayout] = useState<number | null>(null);
+
 const [dtTotalBet, setDtTotalBet] =
   useState(0);
 
@@ -156,6 +161,7 @@ const [dtPlayers, setDtPlayers] =
   useState(0);
 
 const dtRoundRef = useRef<string | null>(null);
+const dtWalletRefreshRoundRef = useRef<string | null>(null);
 
   const multTimer = useRef<any>(null);
   const revealTimer = useRef<any>(null);
@@ -166,7 +172,10 @@ const dtRoundRef = useRef<string | null>(null);
   const cashingRef = useRef(false);
 
   // reanimated shared values
-  const fly = useSharedValue(0);        // crash/aviator climb 0..1
+  const fly = useSharedValue(0); 
+  const crashExitX = useSharedValue(0);
+  const crashExitY = useSharedValue(0);
+  const crashExitRoundRef = useRef<string | null>(null);       // crash/aviator climb 0..1
   const rotate = useSharedValue(0);     // spin wheel deg
   const diceRot = useSharedValue(0);    // dice rotation
   const diceBounce = useSharedValue(0); // dice bounce
@@ -202,6 +211,7 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
      // ---- Global live crash polling (plane always flies, bet anytime during waiting) ----
   const [liveStatus, setLiveStatus] = useState<'waiting' | 'flying' | 'crashed'>('waiting');
   const [liveRoundId, setLiveRoundId] = useState<string | null>(null);
+  const [waitingSeconds, setWaitingSeconds] = useState(5);
   const [myLiveBetPlaced, setMyLiveBetPlaced] = useState(false);
   const livePollTimer = useRef<any>(null);
   const lastRoundIdRef = useRef<string | null>(null);
@@ -214,6 +224,7 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
         if (st.round_id && st.round_id !== lastRoundIdRef.current) {
           lastRoundIdRef.current = st.round_id;
           setMyLiveBetPlaced(false);
+          if (st.status === 'waiting') setWaitingSeconds(5);
         }
         setLiveRoundId(st.round_id || null);
         if (st.status === 'waiting') {
@@ -221,6 +232,11 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
           setDisplay('READY');
           setFlying(false);
           fly.value = 0;
+          cancelAnimation(crashExitX);
+          cancelAnimation(crashExitY);
+          crashExitX.value = 0;
+          crashExitY.value = 0;
+          crashExitRoundRef.current = null;
           setResult(null);
         } else if (st.status === 'flying') {
           setLiveStatus('flying');
@@ -235,6 +251,26 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
             glowIntensity.value = withTiming(0, { duration: 300 });
             try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error); } catch {}
           }
+          if (
+            gt === 'aviator' &&
+            st.round_id &&
+            crashExitRoundRef.current !== st.round_id
+          ) {
+            // Run the crash exit animation only once for this round.
+            crashExitRoundRef.current = st.round_id;
+            cancelAnimation(crashExitX);
+            cancelAnimation(crashExitY);
+            crashExitX.value = 0;
+            crashExitY.value = 0;
+            crashExitX.value = withTiming(900, {
+              duration: 550,
+              easing: Easing.in(Easing.quad),
+            });
+            crashExitY.value = withTiming(-520, {
+              duration: 550,
+              easing: Easing.in(Easing.quad),
+            });
+          }
           setLiveStatus('crashed');
           setFlying(false);
           setDisplay(`CRASHED @ ${st.crash_point?.toFixed(2)}x`);
@@ -244,11 +280,20 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
     return () => { if (livePollTimer.current) clearInterval(livePollTimer.current); };
   }, [isCrash, liveStatus]);
 
+  // Centre waiting timer: counts down once per second and disappears as soon as a round starts.
+  useEffect(() => {
+    if (!isCrash || liveStatus !== 'waiting') return;
+    const timerId = setInterval(() => {
+      setWaitingSeconds((current) => Math.max(0, current - 1));
+    }, 1000);
+    return () => clearInterval(timerId);
+  }, [isCrash, liveStatus, liveRoundId]);
+
   const clearTimers = useCallback(() => {
     [multTimer, revealTimer, cdTimer, climbTimer, pollTimer].forEach((t) => { if (t.current) { clearInterval(t.current); clearTimeout(t.current); t.current = null; } });
   }, []);
 
-  useEffect(() => () => { clearTimers(); [fly, rotate, diceRot, diceBounce, bgShift, cardFlip, cardDeal1, cardDeal2, cardDeal3, ballDrop, dartFly].forEach(cancelAnimation); }, []);
+  useEffect(() => () => { clearTimers(); [fly, crashExitX, crashExitY, rotate, diceRot, diceBounce, bgShift, cardFlip, cardDeal1, cardDeal2, cardDeal3, ballDrop, dartFly].forEach(cancelAnimation); }, []);
 
   useEffect(() => {
   if (!isDragonTiger) return;
@@ -270,6 +315,10 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
 
         setDtRoundId(st.round_id);
         setDtBetPlaced(false);
+        setDtBetSubmitting(false);
+        setDtMyBetSettled(false);
+        setDtMyBetWin(null);
+        setDtMyBetPayout(null);
         setDtPick(null);
         setDtDragonCard(null);
         setDtTigerCard(null);
@@ -294,6 +343,22 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
       setDtPlayers(
         Number(st.round_player_count ?? 0)
       );
+
+      // The server is authoritative: only show a personal win/loss after settlement.
+      const myBet = st.my_bet;
+      if (myBet) {
+        setDtBetPlaced(true);
+        setDtPick(myBet.pick === 'dragon' || myBet.pick === 'tiger' ? myBet.pick : null);
+        if (myBet.settled === true) {
+          setDtMyBetSettled(true);
+          setDtMyBetWin(myBet.win === true);
+          setDtMyBetPayout(Number(myBet.payout ?? 0));
+        } else {
+          setDtMyBetSettled(false);
+          setDtMyBetWin(null);
+          setDtMyBetPayout(null);
+        }
+      }
 
       if (st.status === 'waiting') {
         setDisplay(
@@ -332,14 +397,14 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
             : '🐯 TIGER WINS'
         );
 
-        // Refresh wallet after server settlement
-        try {
-          const me = await api.me();
-
-          if (me?.balance != null) {
-            setBalance(me.balance);
-          }
-        } catch {}
+        // Refresh wallet once per revealed round, after backend settlement is complete.
+        if (dtWalletRefreshRoundRef.current !== st.round_id) {
+          dtWalletRefreshRoundRef.current = st.round_id ?? null;
+          try {
+            const me = await api.me();
+            if (me?.balance != null) setBalance(me.balance);
+          } catch {}
+        }
       }
 
     } catch (error) {
@@ -798,7 +863,7 @@ const runAnimationFor = (res: any) => {
   const placeDragonTigerBet = async (
   side: 'dragon' | 'tiger'
 ) => {
-  if (busy) return;
+  if (busy || dtBetSubmitting) return;
 
   if (dtBetPlaced) {
     setError(
@@ -827,7 +892,7 @@ const runAnimationFor = (res: any) => {
   }
 
   try {
-    setBusy(true);
+    setDtBetSubmitting(true);
     setError(null);
 
     const result =
@@ -846,6 +911,9 @@ const runAnimationFor = (res: any) => {
 
     setDtPick(side);
     setDtBetPlaced(true);
+    setDtMyBetSettled(false);
+    setDtMyBetWin(null);
+    setDtMyBetPayout(null);
 
     setDisplay(
       `BET PLACED · ${side.toUpperCase()}`
@@ -863,7 +931,7 @@ const runAnimationFor = (res: any) => {
     );
 
   } finally {
-    setBusy(false);
+    setDtBetSubmitting(false);
   }
 };
 
@@ -872,6 +940,17 @@ const runAnimationFor = (res: any) => {
     const amt = parseFloat(bet) || 0;
     if (amt <= 0) { setError('Enter a valid bet amount'); return; }
     if (amt > balance) { setError('Insufficient balance'); return; }
+
+    // Dragon Tiger must use its own authenticated live-round bet endpoint.
+    // Never let the generic game-play endpoint generate a random win for this game.
+    if (isDragonTiger) {
+      if (!dtPick) {
+        setError('Pehle BET DRAGON ya BET TIGER select karo.');
+        return;
+      }
+      await placeDragonTigerBet(dtPick);
+      return;
+    }
 
     if (isCrash) {
       if (liveStatus !== 'waiting') { setError('Betting closed — wait for next round'); return; }
@@ -1081,14 +1160,34 @@ const trailGlowProps = useAnimatedProps(() => ({
 
 const flyStyle = useAnimatedStyle(() => {
   const p = Math.min(1, fly.value);
-  const { centerProgress, hoverX, hoverY } = getPlanePoint(p, 428);
-  const rotation = centerProgress >= 1 ? Math.sin(p * Math.PI * 10) * 2 : -centerProgress * 8;
+
+  const { centerProgress, hoverX, hoverY } =
+    getPlanePoint(p, 428);
+
+  const rotation =
+    centerProgress >= 1
+      ? Math.sin(p * Math.PI * 10) * 2
+      : -centerProgress * 8;
 
   return {
     transform: [
-      { translateX: centerProgress * PLANE_TRAVEL_X + hoverX + shake.value * 0.4 },
-      { translateY: -centerProgress * PLANE_TRAVEL_Y + hoverY + shake.value },
-      { rotate: `${rotation}deg` },
+      {
+        translateX:
+          centerProgress * PLANE_TRAVEL_X +
+          hoverX +
+          shake.value * 0.3 +
+          (gt === 'aviator' ? crashExitX.value : 0),
+      },
+      {
+        translateY:
+          -centerProgress * PLANE_TRAVEL_Y +
+          hoverY +
+          shake.value +
+          (gt === 'aviator' ? crashExitY.value : 0),
+      },
+      {
+        rotate: `${rotation}deg`,
+      },
     ],
   };
 });
@@ -1167,7 +1266,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
             {(gt === 'crash' || gt === 'aviator') && (
               <Animated.View style={[StyleSheet.absoluteFill, bgStyle, { pointerEvents: 'none' }]}>
                 {[...Array(6)].map((_, i) => (
-                  <View key={i} style={{ position: 'absolute', top: 20 + i * 34, left: 40 + i * 48, width: 4, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.25)' }} />
+                  <View key={i} style={{ position: 'absolute', top: 25 + i * 34, left: 40 + i * 48, width: 4, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.25)' }} />
                 ))}
               </Animated.View>
             )}
@@ -1183,8 +1282,17 @@ const cardStyle3 = useAnimatedStyle(() => ({
                       style={styles.gameSpaceBackground}
                       resizeMode="cover"
                      />
+                    {liveStatus === 'waiting' && (
+                      <View pointerEvents="none" style={styles.aviatorWaitingOverlay}>
+                        <Text style={styles.aviatorWaitingLabel}>NEXT ROUND IN</Text>
+                        <View style={styles.aviatorTimerRing}>
+                          <Text style={styles.aviatorTimerNumber}>{waitingSeconds}</Text>
+                        </View>
+                        <Text style={styles.aviatorWaitingSub}>GET READY</Text>
+                      </View>
+                    )}
                   {liveStatus !== 'waiting' && (   
-                    <Svg width="109%" height="97%" style={{ position: 'absolute' }} pointerEvents="none">
+                    <Svg width="105%" height="99%" style={{ position: 'absolute' }} pointerEvents="none">
   <Defs>
     <SvgLinearGradient id="trailFade" x1="0%" y1="100%" x2="100%" y2="0%">
       <Stop offset="0%" stopColor="#FF003C" stopOpacity={0.5} />
@@ -1194,15 +1302,15 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
   <AnimatedPath animatedProps={trailFillProps} fill="url(#trailFade)" />
 
-  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#FF003C" strokeWidth={22} strokeLinecap="round" opacity={0.2} />
-  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#a80210" strokeWidth={6} strokeLinecap="round" opacity={1} />
-  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#f80324" strokeWidth={8} strokeLinecap="round" opacity={0.95} />
+  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#FF003C" strokeWidth={5} strokeLinecap="round" opacity={0.3} />
+  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#a80210" strokeWidth={4} strokeLinecap="round" opacity={0.60} />
+  <AnimatedPath animatedProps={trailGlowProps} fill="none" stroke="#f80324" strokeWidth={2} strokeLinecap="round" opacity={0.30} />
 </Svg>
                   )}
 
-                    <Animated.View style={[{ position: 'absolute', bottom: 6, left: 10, }, flyStyle]}>
+                    <Animated.View style={[{ position: 'absolute', bottom: 2, left: 5, }, flyStyle]}>
                       {gt === 'aviator' ? (
-                      <Image source={require('../../assets/images/plane.png')} style={{ width: 100, height: 100, resizeMode: 'contain' }} />
+                      <Image source={require('../../assets/images/plane.png')} style={{ width: 90, height: 90, resizeMode: 'contain' }} />
                     ) : gt === 'crash' ? (
                       <Image source={require('../../assets/images/rocket.png')} style={{ width: 100, height: 100, resizeMode: 'contain' }} />
                     ) : (
@@ -1251,6 +1359,18 @@ const cardStyle3 = useAnimatedStyle(() => ({
     </View>
 
 
+    {/* Centre gaming countdown: visible only while betting is open. */}
+    {dtStatus === 'waiting' && (
+      <View pointerEvents="none" style={styles.dtWaitingOverlay}>
+        <Text style={styles.dtWaitingLabel}>BETTING CLOSES IN</Text>
+        <View style={styles.dtWaitingRing}>
+          <Text style={styles.dtWaitingNumber}>{Math.max(0, Math.ceil(dtTimeLeft))}</Text>
+          <Text style={styles.dtWaitingSeconds}>SECONDS</Text>
+        </View>
+        <Text style={styles.dtWaitingSub}>PLACE YOUR BET</Text>
+      </View>
+    )}
+
     {/* CARDS */}
     <View style={styles.dtCardsRow}>
 
@@ -1285,13 +1405,13 @@ const cardStyle3 = useAnimatedStyle(() => ({
           disabled={
             dtStatus !== 'waiting' ||
             dtBetPlaced ||
-            busy
+            dtBetSubmitting
           }
-          onPress={() =>
-            placeDragonTigerBet(
-              'dragon'
-            )
-          }
+          onPress={() => {
+            setError(null);
+            setDtPick('dragon');
+            setDisplay('DRAGON SELECTED · TAP PLACE BET');
+          }}
           style={[
             styles.dtBetButton,
             styles.dtDragonButton,
@@ -1301,9 +1421,9 @@ const cardStyle3 = useAnimatedStyle(() => ({
         >
 
           <Text style={styles.dtBetText}>
-            {dtPick === 'dragon'
+            {dtBetSubmitting ? 'PLACING…' : dtBetPlaced && dtPick === 'dragon'
               ? 'BET PLACED'
-              : 'BET DRAGON'}
+              : dtPick === 'dragon' ? 'DRAGON SELECTED' : 'BET DRAGON'}
           </Text>
 
         </Pressable>
@@ -1350,13 +1470,13 @@ const cardStyle3 = useAnimatedStyle(() => ({
           disabled={
             dtStatus !== 'waiting' ||
             dtBetPlaced ||
-            busy
+            dtBetSubmitting
           }
-          onPress={() =>
-            placeDragonTigerBet(
-              'tiger'
-            )
-          }
+          onPress={() => {
+            setError(null);
+            setDtPick('tiger');
+            setDisplay('TIGER SELECTED · TAP PLACE BET');
+          }}
           style={[
             styles.dtBetButton,
             styles.dtTigerButton,
@@ -1366,9 +1486,9 @@ const cardStyle3 = useAnimatedStyle(() => ({
         >
 
           <Text style={styles.dtBetText}>
-            {dtPick === 'tiger'
+            {dtBetSubmitting ? 'PLACING…' : dtBetPlaced && dtPick === 'tiger'
               ? 'BET PLACED'
-              : 'BET TIGER'}
+              : dtPick === 'tiger' ? 'TIGER SELECTED' : 'BET TIGER'}
           </Text>
 
         </Pressable>
@@ -1393,23 +1513,19 @@ const cardStyle3 = useAnimatedStyle(() => ({
               : '🐯 TIGER WINS'}
           </Text>
 
-          {dtBetPlaced &&
-            dtPick === dtWinner && (
-              <Text
-                style={styles.dtWin}
-              >
-                🎉 YOU WIN • 1.90X
-              </Text>
-            )}
+          {dtBetPlaced && dtMyBetSettled && dtMyBetWin === true && (
+            <Text style={styles.dtWin}>
+              🎉 YOU WIN • ₹{Number(dtMyBetPayout ?? 0).toFixed(2)}
+            </Text>
+          )}
 
-          {dtBetPlaced &&
-            dtPick !== dtWinner && (
-              <Text
-                style={styles.dtLose}
-              >
-                BET LOST
-              </Text>
-            )}
+          {dtBetPlaced && dtMyBetSettled && dtMyBetWin === false && (
+            <Text style={styles.dtLose}>BET LOST</Text>
+          )}
+
+          {dtBetPlaced && !dtMyBetSettled && (
+            <Text style={styles.dtLose}>SETTLING…</Text>
+          )}
 
         </View>
       )}
@@ -2652,7 +2768,13 @@ const cardStyle3 = useAnimatedStyle(() => ({
               <Text style={styles.cashOutSub}>₹{((parseFloat(bet) || 0) * parseFloat(liveMult)).toFixed(0)}</Text>
             </Pressable>
           ) : (
-            <PrimaryButton testID="play-btn" label={busy ? (isCrash ? 'Launching…' : 'Playing…') : `Place Bet · ₹${bet || 0}`} onPress={play} loading={busy && !isCrash} disabled={busy} />
+            <PrimaryButton
+              testID="play-btn"
+              label={isDragonTiger && dtBetSubmitting ? 'Placing Bet…' : busy ? (isCrash ? 'Launching…' : 'Playing…') : `Place Bet · ₹${bet || 0}`}
+              onPress={play}
+              loading={(busy && !isCrash) || (isDragonTiger && dtBetSubmitting)}
+              disabled={busy || (isDragonTiger && (dtBetSubmitting || dtBetPlaced || dtStatus !== 'waiting'))}
+            />
           )}
         </View>
       </ScrollView>
@@ -2728,6 +2850,30 @@ const styles = StyleSheet.create({
   dealerLabel: { color: '#FFD700', fontWeight: '800', fontSize: 12, marginBottom: 6, letterSpacing: 1 },
   cardRank: { fontSize: 22, fontWeight: '900' },
   cardSuit: { fontSize: 18, fontWeight: '800', marginTop: 2 },
+  aviatorWaitingOverlay: {
+  position: 'absolute',
+  top: 0, left: 0, right: 0, bottom: 0,
+  zIndex: 5, alignItems: 'center', justifyContent: 'center',
+  backgroundColor: 'rgba(3, 10, 28, 0.20)',
+},
+aviatorWaitingLabel: {
+  color: '#DDF7FF', fontSize: 13, fontWeight: '900', letterSpacing: 3,
+  textShadowColor: '#00C8FF', textShadowRadius: 12, marginBottom: 12,
+},
+aviatorTimerRing: {
+  width: 100, height: 100, borderRadius: 50,
+  alignItems: 'center', justifyContent: 'center',
+  borderWidth: 3, borderColor: '#00E5FF',
+  backgroundColor: 'rgba(2, 18, 42, 0.78)',
+  shadowColor: '#00D9FF', shadowOpacity: 0.9, shadowRadius: 18, elevation: 12,
+},
+aviatorTimerNumber: {
+  color: '#FFFFFF', fontSize: 54, fontWeight: '900',
+  textShadowColor: '#00D9FF', textShadowRadius: 16,
+},
+aviatorWaitingSub: {
+  marginTop: 12, color: '#00E5FF', fontSize: 12, fontWeight: '900', letterSpacing: 4,
+},
   gameSpaceBackground: {
   position: 'absolute',
   top: 0,
@@ -3403,6 +3549,7 @@ plinkoFinalResultValue: {
 
   dtTable: {
   width: '100%',
+  position: 'relative',
   borderRadius: 20,
   backgroundColor: '#082B20',
   borderWidth: 2,
@@ -3450,6 +3597,60 @@ dtTimer: {
   color: '#FFD700',
   fontSize: 18,
   fontWeight: '900',
+},
+
+dtWaitingOverlay: {
+  position: 'absolute',
+  top: 112,
+  left: 0,
+  right: 0,
+  zIndex: 10,
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+dtWaitingLabel: {
+  color: '#E7FFF5',
+  fontSize: 10,
+  fontWeight: '900',
+  letterSpacing: 2,
+  textShadowColor: '#00FFC2',
+  textShadowRadius: 8,
+  marginBottom: 6,
+},
+dtWaitingRing: {
+  width: 78,
+  height: 78,
+  borderRadius: 39,
+  borderWidth: 3,
+  borderColor: '#00FFC2',
+  backgroundColor: 'rgba(1, 24, 18, 0.92)',
+  alignItems: 'center',
+  justifyContent: 'center',
+  shadowColor: '#00FFC2',
+  shadowOpacity: 0.9,
+  shadowRadius: 14,
+  elevation: 12,
+},
+dtWaitingNumber: {
+  color: '#FFFFFF',
+  fontSize: 34,
+  lineHeight: 38,
+  fontWeight: '900',
+  textShadowColor: '#00FFC2',
+  textShadowRadius: 12,
+},
+dtWaitingSeconds: {
+  color: '#8DFFE4',
+  fontSize: 7,
+  fontWeight: '900',
+  letterSpacing: 1.5,
+},
+dtWaitingSub: {
+  color: '#A9FFE9',
+  fontSize: 9,
+  fontWeight: '900',
+  letterSpacing: 2,
+  marginTop: 5,
 },
 
 dtCardsRow: {
