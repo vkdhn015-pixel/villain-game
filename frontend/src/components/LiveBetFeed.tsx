@@ -7,6 +7,7 @@ import { api } from '@/src/api';
 type Entry = { name: string; game: string; amount: number; multiplier?: number | null; real?: boolean };
 
 const NAMES = ['RajaKing', 'LuckyStar', 'AceHunter', 'ProGamer', 'SkyWinner', 'GoldRush', 'RoyalAK', 'TigerZ', 'MegaWin', 'ThunderX', 'FastCash', 'DiamondD'];
+const RGB_NAME_COLORS = ['#1797ff', '#ea26fc', '#2979FF', '#00f9cf', '#FF9100', '#00B8D4'];
 function mask(n: string) { return n.length <= 3 ? n[0] + '**' : n.slice(0, 2) + '***' + n.slice(-1); }
 function synth(game: string): Entry {
   return {
@@ -42,7 +43,7 @@ export default function LiveBetFeed({ game }: { game: string }) {
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingRight: 16 }}>
         {items.map((e, i) => (
-          <View key={`${i}-${e.name}-${e.amount}`} style={styles.chip}>
+          <View key={`${i}-${e.name}-${e.amount}`} style={[styles.chip, { backgroundColor: RGB_NAME_COLORS[i % RGB_NAME_COLORS.length] }]}>
             <View style={styles.avatar}><Ionicons name="person" size={11} color={colors.brandPrimary} /></View>
             <Text style={styles.name} numberOfLines={1}>{e.name}</Text>
             {e.multiplier ? <Text style={styles.mult}>{e.multiplier}x</Text> : null}
@@ -59,9 +60,9 @@ const styles = StyleSheet.create({
   header: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#2ECA7F' },
   liveText: { fontSize: 11, fontWeight: '800', color: colors.onSurfaceSecondary, letterSpacing: 1 },
-  chip: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: '#fff', paddingVertical: 7, paddingHorizontal: 10, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 7, paddingHorizontal: 10, borderRadius: radius.pill, borderWidth: 1, borderColor: 'rgba(255,255,255,0.35)' },
   avatar: { width: 20, height: 20, borderRadius: 10, backgroundColor: colors.brandTertiary, alignItems: 'center', justifyContent: 'center' },
-  name: { fontSize: 12, fontWeight: '700', color: colors.onSurface, maxWidth: 70 },
+  name: { fontSize: 12, fontWeight: '800', color: '#FFFFFF', maxWidth: 70 },
   mult: { fontSize: 11, fontWeight: '800', color: colors.warning },
   amount: { fontSize: 12, fontWeight: '800', color: colors.success },
 });

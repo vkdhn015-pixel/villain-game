@@ -15,6 +15,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import math
 import asyncio
 import io
 import base64
@@ -303,8 +304,11 @@ class DepositCreate(BaseModel):
 
 class WithdrawCreate(BaseModel):
     amount: float
-    upi_id: str
+    method: str = "upi"  # upi | bank
+    upi_id: Optional[str] = None
     account_name: str
+    account_number: Optional[str] = None
+    ifsc_code: Optional[str] = None
 
 
 class SupportTicketIn(BaseModel):
@@ -330,6 +334,10 @@ class UpsertPaymentConfigIn(BaseModel):
 # ------- Startup: seed -------
 @app.on_event("startup")
 async def startup():
+    # Ensure a user can only enter each fantasy contest once.
+    await db.fantasy_entries.create_index([("contest_id", 1), ("user_id", 1)], unique=True)
+    await db.fantasy_prize_payouts.create_index("payout_key", unique=True)
+
     # Seed admin
     existing = await db.admins.find_one({"phone": ADMIN_SEED_PHONE})
     if not existing:
@@ -374,7 +382,9 @@ async def startup():
         ])
 
     asyncio.create_task(live_round_loop())
-    asyncio.create_task(dragon_tiger_loop()) 
+    asyncio.create_task(dragon_tiger_loop())
+    # Periodically settle completed fantasy contests even if nobody opens leaderboard.
+    asyncio.create_task(fantasy_settlement_loop()) 
 
 
 async def get_win_rate(game: Optional[str] = None) -> float:
@@ -677,27 +687,55 @@ async def my_deposits(user=Depends(get_current_user)):
 @api.post("/withdrawals")
 async def create_withdraw(payload: WithdrawCreate, user=Depends(get_current_user)):
     cfg = await db.payment_config.find_one({"id": "default"}) or {}
+    if payload.amount <= 0:
+        raise HTTPException(400, "Withdrawal amount must be greater than zero")
     if payload.amount < cfg.get("min_withdraw", 200):
         raise HTTPException(400, f"Minimum withdrawal is ₹{cfg.get('min_withdraw', 200)}")
     if payload.amount > cfg.get("max_withdraw", 100000):
         raise HTTPException(400, f"Maximum withdrawal is ₹{cfg.get('max_withdraw', 100000)}")
     if payload.amount > user["balance"]:
         raise HTTPException(400, "Insufficient balance")
-    # lock funds
-    await db.users.update_one({"id": user["id"]}, {"$inc": {"balance": -payload.amount}})
+    method = (payload.method or "upi").lower()
+    if method not in {"upi", "bank"}:
+        raise HTTPException(400, "Withdrawal method must be upi or bank")
+    if not payload.account_name.strip():
+        raise HTTPException(400, "Account holder name is required")
+    payout_details: Dict[str, Any]
+    if method == "upi":
+        upi_id = (payload.upi_id or "").strip()
+        if "@" not in upi_id or len(upi_id) > 100:
+            raise HTTPException(400, "Valid UPI ID is required")
+        payout_details = {"method": "upi", "upi_id": upi_id}
+    else:
+        account_number = (payload.account_number or "").strip()
+        if not account_number.isdigit() or not (8 <= len(account_number) <= 18):
+            raise HTTPException(400, "Bank account number must contain 8 to 18 digits")
+        if not (payload.ifsc_code or "").strip().upper() or not __import__("re").fullmatch(r"[A-Z]{4}0[A-Z0-9]{6}", payload.ifsc_code.strip().upper()):
+            raise HTTPException(400, "Valid IFSC code is required")
+        payout_details = {"method": "bank", "account_number": account_number, "ifsc_code": payload.ifsc_code.strip().upper()}
+    # Lock funds when the request is created. Rejected requests are refunded by admin action.
+    updated = await db.users.update_one(
+        {"id": user["id"], "balance": {"$gte": payload.amount}},
+        {"$inc": {"balance": -payload.amount}},
+    )
+    if not updated.modified_count:
+        raise HTTPException(400, "Insufficient balance")
     w = {
         "id": new_id(),
         "user_id": user["id"],
         "user_phone": user["phone"],
         "user_name": user["name"],
         "amount": payload.amount,
-        "upi_id": payload.upi_id,
-        "account_name": payload.account_name,
+        "method": method,
+        **payout_details,
+        "account_name": payload.account_name.strip(),
         "status": "pending",
         "created_at": now_iso(),
     }
     await db.withdrawals.insert_one(w.copy())
-    await add_transaction(user["id"], "withdraw", -payload.amount, {"upi_id": payload.upi_id, "status": "pending"}, status="pending")
+    tx_details = {k: v for k, v in payout_details.items() if k in {"method", "upi_id", "ifsc_code"}}
+    tx_details.update({"status": "pending", "account_name": payload.account_name.strip()})
+    await add_transaction(user["id"], "withdraw", -payload.amount, tx_details, status="pending")
     w.pop("_id", None)
     return w
 
@@ -933,35 +971,26 @@ async def play_game(payload: PlayGameIn, user=Depends(get_current_user)):
         if is_win: payout = payload.bet_amount * 3.0
         result_meta.update({"pick": pick, "roll": roll, "multiplier": 3.0})
     elif gt == "plinko":
-        upper_slots = [10, 4, 2, 1.2, 0.5, 1.2, 2, 4, 10]
-        lower_slots = [4, 3, 2, 1.5, 1, 1.5, 2, 3, 4]
+        # Authentic 14-row Plinko: each peg encounter sends the ball left or right.
+        # Fourteen independent bounces create 15 possible landing slots with a
+        # binomial (center-heavy) landing distribution instead of a uniform slot pick.
+        plinko_multipliers = [5, 2, 1.8, 1.5, 1.2, 0.8, 0.5, 0.2, 0.5, 0.8, 1.2, 1.5, 1.8, 2, 5]
+        path = [random.choice([-1, 1]) for _ in range(14)]  # -1 = left, +1 = right
+        slot = sum(1 for direction in path if direction == 1)
+        multiplier = float(plinko_multipliers[slot])
 
-        # Same position is used for both rows
-        idx = random.randint(0, len(upper_slots) - 1)
-
-        upper_multiplier = upper_slots[idx]
-        lower_multiplier = lower_slots[idx]
-
-        # Final result = Upper - Lower
-        final_multiplier = round(
-            upper_multiplier - lower_multiplier,
-            2
-        )
-
-        # Never allow negative payout
-        if final_multiplier < 0:
-            final_multiplier = 0
-
-        if is_win and final_multiplier > 0:
-            payout = payload.bet_amount * final_multiplier
-
+        # Payout comes from the physical landing slot, not a separate random win roll.
+        payout = round(float(payload.bet_amount) * multiplier, 2)
+        is_win = multiplier > 1.0
         result_meta.update({
-            "slot": idx,
-            "upper_multiplier": upper_multiplier,
-            "lower_multiplier": lower_multiplier,
-            "multiplier": final_multiplier,
-            "final_multiplier": final_multiplier,
-    })
+            "win": is_win,
+            "slot": slot,
+            "path": ["R" if direction == 1 else "L" for direction in path],
+            "rows": 14,
+            "multiplier": multiplier,
+            "final_multiplier": multiplier,
+            "payout": payout,
+        })
     elif gt == "mines":
         picks = int(payload.params.get("picks", 3)); picks = max(1, min(5, picks))
         multiplier = round(1.0 + picks * 0.6, 2)
@@ -1554,14 +1583,45 @@ async def admin_list_users(admin=Depends(get_current_admin), q: Optional[str] = 
 
 @api.post("/admin/users/{uid}/adjust")
 async def admin_adjust_balance(uid: str, payload: Dict[str, Any], admin=Depends(get_current_admin)):
-    delta = float(payload.get("delta", 0))
-    reason = payload.get("reason", "Admin adjustment")
-    u = await db.users.find_one({"id": uid})
-    if not u:
+    # Admin-only manual wallet adjustment. Accept either the internal id or the
+    # public UID shown in the admin/user screens.
+    try:
+        delta = float(payload.get("delta", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Coins amount must be a valid number")
+    if not math.isfinite(delta) or delta == 0:
+        raise HTTPException(400, "Coins amount must be greater than zero")
+    if abs(delta) > 100000000:
+        raise HTTPException(400, "Coins amount is too large")
+
+    reason = str(payload.get("reason", "Admin adjustment")).strip()[:160] or "Admin adjustment"
+    user = await db.users.find_one({"id": uid})
+    if not user:
+        user = await db.users.find_one({"uid": uid})
+    if not user:
         raise HTTPException(404, "User not found")
-    await db.users.update_one({"id": uid}, {"$inc": {"balance": delta}})
-    await add_transaction(uid, "bonus" if delta > 0 else "refund", delta, {"reason": reason, "by": admin["phone"]})
-    return clean(await db.users.find_one({"id": uid}))
+
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(400, "User record is missing its internal ID")
+
+    # Prevent a negative wallet when an admin performs a debit adjustment.
+    if delta < 0:
+        current_balance = float(user.get("balance", 0) or 0)
+        if current_balance + delta < 0:
+            raise HTTPException(400, "Insufficient balance for this adjustment")
+
+    await db.users.update_one({"id": user_id}, {"$inc": {"balance": delta}})
+    await add_transaction(user_id, "bonus" if delta > 0 else "refund", delta,
+                          {"reason": reason, "by": admin.get("phone", "admin")})
+    if delta > 0:
+        await db.notifications.insert_one({
+            "id": new_id(), "user_id": user_id,
+            "title": "Coins Added by Admin",
+            "body": f"{delta:g} coins were added to your wallet. Reason: {reason}",
+            "read": False, "created_at": now_iso(),
+        })
+    return clean(await db.users.find_one({"id": user_id}))
 
 
 @api.post("/admin/users/{uid}/block")
@@ -1627,11 +1687,12 @@ async def admin_act_withdrawal(wid: str, action: str, admin=Depends(get_current_
         raise HTTPException(400, "Already processed")
     if action == "approve":
         # funds already locked; complete the tx
-        await add_transaction(w["user_id"], "withdraw", -w["amount"], {"upi_id": w["upi_id"], "status": "completed"})
+        payout_destination = w.get("upi_id") if w.get("method", "upi") == "upi" else f"bank account ending {str(w.get('account_number', ''))[-4:]}"
+        await add_transaction(w["user_id"], "withdraw", -w["amount"], {"method": w.get("method", "upi"), "status": "completed", "destination": payout_destination}, status="completed")
         await db.notifications.insert_one({
             "id": new_id(), "user_id": w["user_id"],
             "title": "Withdrawal Approved",
-            "body": f"₹{w['amount']} has been sent to {w['upi_id']}.", "read": False, "created_at": now_iso(),
+            "body": f"Your withdrawal request of ₹{w['amount']} was approved. Please check the payout destination for transfer status.", "read": False, "created_at": now_iso(),
         })
     else:
         # refund
@@ -1746,6 +1807,503 @@ async def admin_game_stats(admin=Depends(get_current_admin)):
 @api.get("/admin/tickets")
 async def admin_tickets(admin=Depends(get_current_admin)):
     return await db.tickets.find({}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+
+
+# Fantasy Cricket backend routes (inserted before the Root section)
+import json as _json
+from urllib.parse import urlencode as _urlencode
+from urllib.request import Request as _UrlRequest, urlopen as _urlopen
+from urllib.error import HTTPError as _HTTPError, URLError as _URLError
+
+CRICKET_API_KEY = os.environ.get("CRICKET_API_KEY", "").strip()
+CRICKET_API_BASE = os.environ.get("CRICKET_API_BASE", "https://cricket.sportmonks.com/api/v2.0").rstrip("/")
+FANTASY_STARTING_COINS = 0  # Fantasy uses the existing main wallet; no separate starter balance.
+
+class FantasyTeamCreateIn(BaseModel):
+    match_id: str
+    team_name: str = Field(default="My Fantasy Team", min_length=1, max_length=40)
+    player_ids: List[str] = Field(min_length=11, max_length=11)
+    captain_id: str
+    vice_captain_id: str
+
+class FantasyJoinContestIn(BaseModel):
+    team_id: str
+
+
+def _sportmonks_request_sync(path: str, params: Optional[dict] = None) -> dict:
+    if not CRICKET_API_KEY:
+        raise HTTPException(503, "Cricket API key is not configured. Add CRICKET_API_KEY to backend environment.")
+    query = dict(params or {})
+    query["api_token"] = CRICKET_API_KEY
+    url = f"{CRICKET_API_BASE}/{path.lstrip('/')}?{_urlencode(query, doseq=True)}"
+    request = _UrlRequest(url, headers={"Accept": "application/json", "User-Agent": "Villain11-Fantasy/1.0"})
+    try:
+        with _urlopen(request, timeout=15) as response:
+            return _json.loads(response.read().decode("utf-8"))
+    except _HTTPError as exc:
+        if exc.code in (401, 403):
+            raise HTTPException(502, "Cricket data provider rejected the API key or plan access.")
+        if exc.code == 429:
+            raise HTTPException(503, "Cricket data provider rate limit reached. Try again shortly.")
+        if exc.code == 404:
+            raise HTTPException(404, "Match not found at cricket data provider.")
+        logger.warning("Sportmonks HTTP error %s for %s", exc.code, path)
+        raise HTTPException(502, "Cricket data provider request failed.")
+    except (TimeoutError, _URLError) as exc:
+        logger.warning("Sportmonks connection error: %s", exc)
+        raise HTTPException(502, "Could not connect to cricket data provider.")
+    except Exception as exc:
+        logger.warning("Sportmonks response error: %s", exc)
+        raise HTTPException(502, "Invalid response from cricket data provider.")
+
+async def _sportmonks_get(path: str, params: Optional[dict] = None) -> dict:
+    return await asyncio.to_thread(_sportmonks_request_sync, path, params)
+
+def _sm_data(response: dict):
+    return response.get("data", []) if isinstance(response, dict) else []
+
+def _sm_team_name(team: Any, fallback: str = "TBD") -> str:
+    if isinstance(team, dict):
+        return str(team.get("name") or team.get("fullname") or team.get("code") or fallback)
+    return fallback
+
+def _normalize_fantasy_match(match: dict) -> dict:
+    local = match.get("localteam") or match.get("local_team") or {}
+    visitor = match.get("visitorteam") or match.get("visitor_team") or {}
+    boards = match.get("scoreboards") or []
+    scores = []
+    for board in boards if isinstance(boards, list) else []:
+        if isinstance(board, dict) and (board.get("type") == "total" or board.get("total") is not None):
+            scores.append({"team_id": board.get("team_id"), "score": board.get("total", board.get("score")),
+                           "wickets": board.get("wickets"), "overs": board.get("overs"),
+                           "inning": board.get("scoreboard") or board.get("inning")})
+    raw_status = match.get("status")
+    if isinstance(raw_status, dict):
+        status_text = str(raw_status.get("name") or raw_status.get("short") or raw_status.get("description") or "")
+    else:
+        status_text = str(raw_status or "")
+    if not status_text:
+        status_text = "Live" if match.get("live") else "Scheduled"
+    return {
+        "id": str(match.get("id")), "provider_id": match.get("id"),
+        "league_id": match.get("league_id"), "season_id": match.get("season_id"),
+        "name": match.get("round") or match.get("name") or match.get("type") or "Cricket Match",
+        "format": match.get("type") or "Cricket", "status": status_text,
+        "live": bool(match.get("live")), "starting_at": match.get("starting_at"),
+        "venue": (match.get("venue") or {}).get("name") if isinstance(match.get("venue"), dict) else None,
+        "team_a": {"id": match.get("localteam_id") or local.get("id"), "name": _sm_team_name(local, "Team A"), "code": local.get("code"), "logo": local.get("image_path")},
+        "team_b": {"id": match.get("visitorteam_id") or visitor.get("id"), "name": _sm_team_name(visitor, "Team B"), "code": visitor.get("code"), "logo": visitor.get("image_path")},
+        "scores": scores, "note": match.get("note"),
+    }
+
+async def _fantasy_wallet(user_id: str) -> dict:
+    """Fantasy balance is the user's existing main wallet balance, not a separate wallet."""
+    wallet = await db.users.find_one({"id": user_id}, {"_id": 0, "id": 1, "balance": 1})
+    if not wallet:
+        raise HTTPException(404, "User wallet not found")
+    return {"user_id": user_id, "balance": float(wallet.get("balance", 0) or 0)}
+
+async def _fantasy_coin_tx(user_id: str, amount: int, kind: str, meta: dict):
+    # Keep fantasy activity visible in the existing wallet transaction history.
+    tx_kind = "bet" if amount < 0 else ("win" if kind == "contest_prize" else "refund")
+    await add_transaction(user_id, tx_kind, float(amount), {"game": "fantasy_cricket", "fantasy_kind": kind, **meta})
+
+def _fantasy_player_role(player: dict) -> str:
+    pos = player.get("position")
+    if isinstance(pos, dict): pos = pos.get("name") or pos.get("code") or ""
+    label = str(pos or player.get("role") or "").lower().replace("-", " ")
+    if "keeper" in label or "wicket" in label: return "WK"
+    if "all round" in label or "allround" in label: return "AR"
+    if "bowl" in label: return "BOWL"
+    return "BAT"
+
+def _normalize_fantasy_player(player: dict) -> dict:
+    pid = player.get("player_id") or player.get("id")
+    name = player.get("fullname") or player.get("name")
+    if not name: name = " ".join(str(player.get(k) or "") for k in ("firstname", "lastname")).strip()
+    role = _fantasy_player_role(player)
+    credits = {"WK": 8.5, "BAT": 9.0, "AR": 9.5, "BOWL": 8.5}[role]
+    team_id = player.get("team_id")
+    if team_id is None and isinstance(player.get("team"), dict): team_id = player["team"].get("id")
+    lineup_meta = player.get("lineup") if isinstance(player.get("lineup"), dict) else {}
+    return {"id": str(pid), "name": name or f"Player {pid}", "role": role, "team_id": team_id,
+            "credits": credits, "photo": player.get("image_path") or player.get("image_url"),
+            "captain": bool(lineup_meta.get("captain")), "wicketkeeper": bool(lineup_meta.get("wicketkeeper"))}
+
+async def _get_fantasy_fixture_players(match_id: str) -> tuple[dict, list]:
+    response = await _sportmonks_get(f"fixtures/{match_id}", {"include": "localteam,visitorteam,lineup,scoreboards,runs,batting,bowling,venue"})
+    fixture = _sm_data(response)
+    if not isinstance(fixture, dict): raise HTTPException(404, "Match not found")
+    lineup = fixture.get("lineup") or []
+    players = [_normalize_fantasy_player(p) for p in lineup if isinstance(p, dict) and (p.get("id") is not None or p.get("player_id") is not None)] if isinstance(lineup, list) else []
+    return fixture, players
+
+@api.get("/fantasy/wallet")
+async def fantasy_wallet(user=Depends(get_current_user)):
+    wallet = await _fantasy_wallet(user["id"])
+    return {"balance": wallet["balance"], "withdrawable": True, "currency": "MAIN_WALLET_COINS", "source": "users.balance"}
+
+@api.get("/fantasy/transactions")
+async def fantasy_transactions(user=Depends(get_current_user), limit: int = 50):
+    limit = max(1, min(limit, 100))
+    return await db.transactions.find({"user_id": user["id"], "meta.game": "fantasy_cricket"}, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+
+@api.get("/fantasy/matches")
+async def fantasy_matches(status: str = "all", days: int = 7, user=Depends(get_current_user)):
+    # Return real fixtures/livescores; status may be all, live, upcoming, completed.
+    status = status.lower()
+    if status not in {"all", "live", "upcoming", "completed"}:
+        raise HTTPException(400, "status must be all, live, upcoming, or completed")
+    days = max(1, min(days, 14))
+    matches = []
+    if status in {"all", "live"}:
+        resp = await _sportmonks_get("livescores", {"include": "localteam,visitorteam,scoreboards,venue"})
+        matches.extend([_normalize_fantasy_match(m) for m in _sm_data(resp) if isinstance(m, dict)])
+    if status in {"all", "upcoming", "completed"}:
+        today = datetime.now(timezone.utc).date()
+        start = today - timedelta(days=days) if status == "completed" else today
+        end = today if status == "completed" else today + timedelta(days=days)
+        resp = await _sportmonks_get("fixtures", {"filter[starts_between]": f"{start.isoformat()},{end.isoformat()}",
+            "include": "localteam,visitorteam,scoreboards,venue", "page": 1})
+        for item in _sm_data(resp):
+            if not isinstance(item, dict): continue
+            m = _normalize_fantasy_match(item)
+            st = str(m.get("status") or "").lower()
+            live = m["live"] or any(x in st for x in ("innings", "live", "in play"))
+            done = any(x in st for x in ("finished", "complete", "result", "abandoned"))
+            if status == "upcoming" and (live or done): continue
+            if status == "completed" and not done: continue
+            matches.append(m)
+    unique = {m["id"]: m for m in matches}
+    values = list(unique.values())
+    values.sort(key=lambda m: (not m.get("live", False), str(m.get("starting_at") or "")))
+    values = values[:100]
+    return {"provider": "sportmonks", "matches": values, "count": len(values)}
+
+@api.get("/fantasy/matches/{match_id}")
+async def fantasy_match_detail(match_id: str, user=Depends(get_current_user)):
+    fixture, players = await _get_fantasy_fixture_players(match_id)
+    return {"match": _normalize_fantasy_match(fixture), "players": players,
+            "players_available": len(players), "team_selection_open": len(players) >= 11}
+
+@api.get("/fantasy/matches/{match_id}/players")
+async def fantasy_match_players(match_id: str, user=Depends(get_current_user)):
+    _, players = await _get_fantasy_fixture_players(match_id)
+    return {"match_id": str(match_id), "players": players, "players_available": len(players), "team_selection_open": len(players) >= 11}
+
+@api.post("/fantasy/teams")
+async def fantasy_create_team(payload: FantasyTeamCreateIn, user=Depends(get_current_user)):
+    ids = [str(pid) for pid in payload.player_ids]
+    if len(set(ids)) != 11: raise HTTPException(400, "Select 11 different players")
+    if payload.captain_id not in ids or payload.vice_captain_id not in ids: raise HTTPException(400, "Captain and vice-captain must be in your selected 11")
+    if payload.captain_id == payload.vice_captain_id: raise HTTPException(400, "Captain and vice-captain must be different players")
+    _, available = await _get_fantasy_fixture_players(payload.match_id)
+    by_id = {str(p["id"]): p for p in available}
+    if any(pid not in by_id for pid in ids):
+        raise HTTPException(400, "Selected players are not in this match's published lineup. Refresh after official lineup is announced.")
+    selected = [by_id[pid] for pid in ids]
+    counts = {}
+    for player in selected:
+        key = str(player.get("team_id") or "unknown")
+        counts[key] = counts.get(key, 0) + 1
+    if any(count > 7 for count in counts.values()): raise HTTPException(400, "Maximum 7 players can be selected from one real team")
+    credits = round(sum(float(p.get("credits", 8.5)) for p in selected), 1)
+    if credits > 100: raise HTTPException(400, f"Team exceeds 100 credits (selected {credits})")
+    team = {"id": new_id(), "user_id": user["id"], "match_id": str(payload.match_id),
+        "team_name": payload.team_name.strip() or "My Fantasy Team", "player_ids": ids, "players": selected,
+        "captain_id": payload.captain_id, "vice_captain_id": payload.vice_captain_id,
+        "credits_used": credits, "created_at": now_iso(), "updated_at": now_iso()}
+    await db.fantasy_teams.insert_one(team.copy())
+    return {"success": True, "team": team}
+
+@api.get("/fantasy/teams")
+async def fantasy_my_teams(match_id: Optional[str] = None, user=Depends(get_current_user)):
+    q = {"user_id": user["id"]}
+    if match_id: q["match_id"] = str(match_id)
+    return await db.fantasy_teams.find(q, {"_id": 0}).sort("created_at", -1).to_list(100)
+
+@api.get("/fantasy/teams/{team_id}")
+async def fantasy_get_team(team_id: str, user=Depends(get_current_user)):
+    team = await db.fantasy_teams.find_one({"id": team_id, "user_id": user["id"]}, {"_id": 0})
+    if not team: raise HTTPException(404, "Fantasy team not found")
+    return team
+
+async def _ensure_fantasy_contests(match_id: str):
+    templates = [
+        {"code": "practice", "name": "Practice Contest", "entry_fee": 0, "max_entries": 10000, "prizes": [100, 50, 25]},
+        {"code": "starter", "name": "Starter Contest", "entry_fee": 50, "max_entries": 1000, "prizes": [500, 250, 100]},
+        {"code": "pro", "name": "Pro Contest", "entry_fee": 100, "max_entries": 500, "prizes": [1000, 500, 250]},
+    ]
+    for item in templates:
+        cid = f"{match_id}:{item['code']}"
+        await db.fantasy_contests.update_one({"id": cid}, {"$setOnInsert": {
+            "id": cid, "match_id": str(match_id), "code": item["code"], "name": item["name"],
+            "entry_fee": item["entry_fee"], "max_entries": item["max_entries"], "prizes": item["prizes"],
+            "status": "open", "settled": False, "created_at": now_iso()}}, upsert=True)
+
+@api.get("/fantasy/contests")
+async def fantasy_contests(match_id: str, user=Depends(get_current_user)):
+    await _ensure_fantasy_contests(str(match_id))
+    contests = await db.fantasy_contests.find({"match_id": str(match_id)}, {"_id": 0}).to_list(20)
+    for c in contests:
+        c["joined_count"] = await db.fantasy_entries.count_documents({"contest_id": c["id"]})
+        c["joined"] = bool(await db.fantasy_entries.find_one({"contest_id": c["id"], "user_id": user["id"]}, {"_id": 1}))
+    return contests
+
+@api.post("/fantasy/contests/{contest_id}/join")
+async def fantasy_join_contest(contest_id: str, payload: FantasyJoinContestIn, user=Depends(get_current_user)):
+    contest = await db.fantasy_contests.find_one({"id": contest_id}, {"_id": 0})
+    if not contest: raise HTTPException(404, "Contest not found")
+    if contest.get("status") != "open" or contest.get("settled"): raise HTTPException(400, "This contest is closed")
+    team = await db.fantasy_teams.find_one({"id": payload.team_id, "user_id": user["id"], "match_id": contest["match_id"]}, {"_id": 0})
+    if not team: raise HTTPException(400, "Create a fantasy team for this match first")
+    if await db.fantasy_entries.find_one({"contest_id": contest_id, "user_id": user["id"]}): raise HTTPException(409, "You have already joined this contest")
+    if await db.fantasy_entries.count_documents({"contest_id": contest_id}) >= int(contest.get("max_entries", 1000)): raise HTTPException(400, "Contest is full")
+    fee = int(contest.get("entry_fee", 0))
+    await _fantasy_wallet(user["id"])
+    if fee:
+        # Atomically deduct entry fee from the same balance used by all existing games.
+        debit = await db.users.update_one({"id": user["id"], "balance": {"$gte": fee}}, {"$inc": {"balance": -fee}})
+        if debit.modified_count != 1: raise HTTPException(400, "Insufficient wallet balance")
+        await _fantasy_coin_tx(user["id"], -fee, "contest_entry", {"contest_id": contest_id, "team_id": team["id"]})
+    entry = {"id": new_id(), "contest_id": contest_id, "match_id": contest["match_id"], "user_id": user["id"],
+        "team_id": team["id"], "team_name": team["team_name"], "created_at": now_iso()}
+    try:
+        await db.fantasy_entries.insert_one(entry.copy())
+    except Exception:
+        if fee:
+            await db.users.update_one({"id": user["id"]}, {"$inc": {"balance": fee}})
+            await _fantasy_coin_tx(user["id"], fee, "contest_entry_refund", {"contest_id": contest_id, "reason": "duplicate entry race"})
+        raise HTTPException(409, "Contest entry already exists")
+    return {"success": True, "entry": entry, "wallet": await _fantasy_wallet(user["id"])}
+
+def _as_list(value):
+    """Normalize provider fields that can be a list or an included-data object."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        data = value.get("data")
+        if isinstance(data, list):
+            return data
+        if value.get("id") is not None:
+            return [value]
+    return []
+
+
+def _provider_player_id(row: dict) -> str:
+    player = row.get("player")
+    return str(row.get("player_id") or (player.get("id") if isinstance(player, dict) else None) or row.get("id") or "")
+
+
+def _status_is_finished(status: Any) -> bool:
+    if isinstance(status, dict):
+        status = status.get("name") or status.get("short") or status.get("description") or ""
+    value = str(status or "").strip().lower()
+    return any(word in value for word in ("finished", "complete", "result", "abandoned", "cancelled", "canceled"))
+
+
+async def _fantasy_points_for_match(match_id: str) -> tuple[dict, dict]:
+    """Calculate fantasy points from the latest provider fixture data."""
+    fixture, lineup = await _get_fantasy_fixture_players(match_id)
+    points = {str(p["id"]): 0.0 for p in lineup}
+    names = {str(p["id"]): p.get("name", "Player") for p in lineup}
+    batting_rows = _as_list(fixture.get("batting")) or _as_list(fixture.get("runs"))
+    bowling_rows = _as_list(fixture.get("bowling"))
+
+    for row in batting_rows:
+        if not isinstance(row, dict):
+            continue
+        pid = _provider_player_id(row)
+        if not pid:
+            continue
+        runs = float(row.get("score", row.get("runs", row.get("total", 0))) or 0)
+        fours = float(row.get("four_x", row.get("fours", row.get("four", 0))) or 0)
+        sixes = float(row.get("six_x", row.get("sixes", row.get("six", 0))) or 0)
+        balls = float(row.get("ball", row.get("balls", row.get("ball_faced", 0))) or 0)
+        out_value = row.get("out") or row.get("dismissal") or row.get("wicket")
+        points[pid] = points.get(pid, 0.0) + runs + fours + (2 * sixes)
+        points[pid] += 16 if runs >= 100 else 8 if runs >= 50 else 4 if runs >= 30 else 0
+        if runs == 0 and balls > 0 and out_value:
+            points[pid] -= 2
+        player = row.get("player")
+        if isinstance(player, dict):
+            names[pid] = player.get("fullname") or player.get("name") or names.get(pid, "Player")
+
+    for row in bowling_rows:
+        if not isinstance(row, dict):
+            continue
+        pid = _provider_player_id(row)
+        if not pid:
+            continue
+        wickets = float(row.get("wickets", row.get("wicket", row.get("total_wickets", 0))) or 0)
+        maidens = float(row.get("maidens", row.get("medians", row.get("maiden_overs", 0))) or 0)
+        points[pid] = points.get(pid, 0.0) + (25 * wickets) + (12 * maidens)
+        points[pid] += 16 if wickets >= 5 else 8 if wickets >= 4 else 4 if wickets >= 3 else 0
+        player = row.get("player")
+        if isinstance(player, dict):
+            names[pid] = player.get("fullname") or player.get("name") or names.get(pid, "Player")
+
+    return fixture, {
+        pid: {"points": round(value, 2), "name": names.get(pid, "Player")}
+        for pid, value in points.items()
+    }
+
+
+async def _build_fantasy_leaderboard(contest: dict) -> tuple[dict, list]:
+    fixture, points = await _fantasy_points_for_match(str(contest["match_id"]))
+    entries = await db.fantasy_entries.find({"contest_id": contest["id"]}, {"_id": 0}).to_list(2000)
+    leaderboard = []
+    for entry in entries:
+        team = await db.fantasy_teams.find_one({"id": entry["team_id"]}, {"_id": 0})
+        if not team:
+            continue
+        total = 0.0
+        player_rows = []
+        for pid in team.get("player_ids", []):
+            player_score = float(points.get(str(pid), {}).get("points", 0))
+            multiplier = (
+                2.0 if str(pid) == str(team.get("captain_id"))
+                else 1.5 if str(pid) == str(team.get("vice_captain_id"))
+                else 1.0
+            )
+            scored = round(player_score * multiplier, 2)
+            total += scored
+            player_rows.append({
+                "player_id": str(pid),
+                "name": points.get(str(pid), {}).get("name", "Player"),
+                "base_points": player_score,
+                "multiplier": multiplier,
+                "points": scored,
+            })
+        leaderboard.append({
+            "user_id": entry["user_id"],
+            "team_id": team["id"],
+            "team_name": team["team_name"],
+            "points": round(total, 2),
+            "players": player_rows,
+        })
+    leaderboard.sort(key=lambda row: row["points"], reverse=True)
+    previous_points = None
+    current_rank = 0
+    for index, row in enumerate(leaderboard, 1):
+        if previous_points is None or row["points"] != previous_points:
+            current_rank = index
+        row["rank"] = current_rank
+        previous_points = row["points"]
+    return fixture, leaderboard
+
+
+async def _settle_fantasy_contest(contest: dict, fixture: dict, leaderboard: list) -> bool:
+    """Contest-level lock prevents concurrent leaderboard polls paying twice."""
+    if not _status_is_finished(fixture.get("status")) or not leaderboard or contest.get("settled"):
+        return bool(contest.get("settled"))
+    lock = await db.fantasy_contests.update_one(
+        {"id": contest["id"], "settled": {"$ne": True}, "status": {"$ne": "settling"}},
+        {"$set": {"status": "settling", "settlement_started_at": now_iso()}},
+    )
+    if lock.modified_count != 1:
+        latest = await db.fantasy_contests.find_one({"id": contest["id"]}, {"_id": 0, "settled": 1})
+        return bool((latest or {}).get("settled"))
+
+    try:
+        prizes = contest.get("prizes", [])
+        for idx, prize in enumerate(prizes):
+            if idx >= len(leaderboard):
+                break
+            amount = int(prize)
+            if amount <= 0:
+                continue
+            winner_id = leaderboard[idx]["user_id"]
+            payout_key = f"{contest['id']}:{idx + 1}:{winner_id}"
+            existing = await db.fantasy_prize_payouts.find_one({"payout_key": payout_key}, {"_id": 0})
+            if existing and existing.get("status") == "paid":
+                continue
+            if not existing:
+                try:
+                    await db.fantasy_prize_payouts.insert_one({
+                        "payout_key": payout_key, "contest_id": contest["id"],
+                        "user_id": winner_id, "rank": idx + 1, "amount": amount,
+                        "status": "pending", "created_at": now_iso(),
+                    })
+                except Exception:
+                    existing = await db.fantasy_prize_payouts.find_one({"payout_key": payout_key}, {"_id": 0})
+                    if existing and existing.get("status") == "paid":
+                        continue
+            await _fantasy_wallet(winner_id)
+            await db.users.update_one({"id": winner_id}, {"$inc": {"balance": amount}})
+            await _fantasy_coin_tx(winner_id, amount, "contest_prize", {
+                "contest_id": contest["id"], "rank": idx + 1, "payout_key": payout_key,
+            })
+            await db.fantasy_prize_payouts.update_one(
+                {"payout_key": payout_key},
+                {"$set": {"status": "paid", "paid_at": now_iso()}},
+            )
+        await db.fantasy_contests.update_one(
+            {"id": contest["id"]},
+            {"$set": {"settled": True, "status": "completed", "settled_at": now_iso()}},
+        )
+        return True
+    except Exception:
+        logger.exception("Fantasy settlement failed for contest %s", contest["id"])
+        raise
+
+
+@api.get("/fantasy/matches/{match_id}/points")
+async def fantasy_match_points(match_id: str, user=Depends(get_current_user)):
+    fixture, points = await _fantasy_points_for_match(str(match_id))
+    return {
+        "match_id": str(match_id),
+        "match_status": fixture.get("status"),
+        "finished": _status_is_finished(fixture.get("status")),
+        "updated_at": now_iso(),
+        "players": [
+            {"player_id": pid, "name": value["name"], "points": value["points"]}
+            for pid, value in points.items()
+        ],
+    }
+
+
+@api.get("/fantasy/contests/{contest_id}/leaderboard")
+async def fantasy_leaderboard(contest_id: str, user=Depends(get_current_user)):
+    contest = await db.fantasy_contests.find_one({"id": contest_id}, {"_id": 0})
+    if not contest:
+        raise HTTPException(404, "Contest not found")
+    fixture, leaderboard = await _build_fantasy_leaderboard(contest)
+    settled = await _settle_fantasy_contest(contest, fixture, leaderboard)
+    return {
+        "contest_id": contest_id,
+        "match_id": contest["match_id"],
+        "match_status": fixture.get("status"),
+        "settled": settled,
+        "updated_at": now_iso(),
+        "leaderboard": leaderboard,
+    }
+
+
+async def fantasy_settlement_loop():
+    """Settle completed matches even if nobody opens the leaderboard."""
+    while True:
+        try:
+            cursor = db.fantasy_contests.find(
+                {"settled": {"$ne": True}, "status": {"$in": ["open"]}},
+                {"_id": 0},
+            ).limit(100)
+            async for contest in cursor:
+                try:
+                    fixture, leaderboard = await _build_fantasy_leaderboard(contest)
+                    if _status_is_finished(fixture.get("status")):
+                        await _settle_fantasy_contest(contest, fixture, leaderboard)
+                except HTTPException as exc:
+                    logger.warning("Fantasy settlement skipped for contest %s: %s", contest.get("id"), exc.detail)
+                except Exception:
+                    logger.exception("Fantasy settlement worker failed for contest %s", contest.get("id"))
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Fantasy settlement loop error")
+            await asyncio.sleep(60)
 
 
 # Root

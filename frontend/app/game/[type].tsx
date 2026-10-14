@@ -16,6 +16,7 @@ import { PrimaryButton, inputStyle } from '@/src/ui';
 import { api } from '@/src/api';
 import LiveBetFeed from '@/src/components/LiveBetFeed';
 import * as Haptics from 'expo-haptics';
+import { Audio } from 'expo-av';
 
 const AnimatedPath = Animated.createAnimatedComponent(Path);
 
@@ -188,6 +189,7 @@ const dtWalletRefreshRoundRef = useRef<string | null>(null);
   const plinkoX = useSharedValue(0);
   const plinkoY = useSharedValue(0);
   const plinkoScale = useSharedValue(1);
+  const plinkoOpacity = useSharedValue(1);
   const dartFly = useSharedValue(0);    // bullseye 0..1
   const resultPulse = useSharedValue(1);
   const glowIntensity = useSharedValue(0.3);
@@ -214,7 +216,59 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
   const [waitingSeconds, setWaitingSeconds] = useState(5);
   const [myLiveBetPlaced, setMyLiveBetPlaced] = useState(false);
   const livePollTimer = useRef<any>(null);
+  const crashSoundRef = useRef<Audio.Sound | null>(null);
+  const backgroundSoundRef = useRef<Audio.Sound | null>(null);
+  const lastCrashSoundRoundRef = useRef<string | null>(null);
   const lastRoundIdRef = useRef<string | null>(null);
+
+  // Load looping background music for every game screen, plus the one-shot crash effect.
+  useEffect(() => {
+    let mounted = true;
+    let loadedCrashSound: Audio.Sound | null = null;
+    let loadedBackgroundSound: Audio.Sound | null = null;
+    (async () => {
+      try {
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: true,
+          staysActiveInBackground: false,
+        });
+      } catch (error) {
+        console.warn('Audio mode could not be configured:', error);
+      }
+      try {
+        const { sound } = await Audio.Sound.createAsync(
+          require('../../assets/sounds/crash.wav'),
+          { shouldPlay: false, volume: 0.9 }
+        );
+        loadedCrashSound = sound;
+        if (mounted) crashSoundRef.current = sound;
+        else await sound.unloadAsync();
+      } catch (error) {
+        console.warn('Crash sound could not be loaded:', error);
+      }
+      try {
+        const { sound } = await Audio.Sound.createAsync(
+          require('../../assets/sounds/game-background.wav'),
+          { shouldPlay: true, isLooping: true, volume: 0.14 }
+        );
+        loadedBackgroundSound = sound;
+        if (mounted) backgroundSoundRef.current = sound;
+        else await sound.unloadAsync();
+      } catch (error) {
+        console.warn('Game background sound could not be loaded:', error);
+      }
+    })();
+    return () => {
+      mounted = false;
+      const crash = loadedCrashSound;
+      const background = loadedBackgroundSound;
+      crashSoundRef.current = null;
+      backgroundSoundRef.current = null;
+      if (crash) crash.unloadAsync().catch(() => {});
+      if (background) background.unloadAsync().catch(() => {});
+    };
+  }, []);
 
   useEffect(() => {
     if (!isCrash) return;
@@ -250,6 +304,16 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
             shake.value = withSequence(withTiming(-10, { duration: 60 }), withTiming(10, { duration: 60 }), withTiming(0, { duration: 60 }));
             glowIntensity.value = withTiming(0, { duration: 300 });
             try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error); } catch {}
+            // Play once for each round transition, not on every 300ms poll.
+            if (st.round_id && lastCrashSoundRoundRef.current !== st.round_id) {
+              lastCrashSoundRoundRef.current = st.round_id;
+              const sound = crashSoundRef.current;
+              if (sound) {
+                sound.setPositionAsync(0)
+                  .then(() => sound.playAsync())
+                  .catch((error) => console.warn('Crash sound playback failed:', error));
+              }
+            }
           }
           if (
             gt === 'aviator' &&
@@ -478,6 +542,13 @@ const runAnimationFor = (res: any) => {
       cdTimer.current = setTimeout(() => {
         clearInterval(tickInterval);
         setWinSegIdx(idx);
+
+        // Update the visible wallet ONLY after the wheel has stopped
+        // and the winning segment/result is revealed.
+        if (res?.balance != null) {
+          setBalance(Number(res.balance));
+        }
+
         try { Haptics.notificationAsync(res.win ? Haptics.NotificationFeedbackType.Success : Haptics.NotificationFeedbackType.Warning); } catch {}
         finishRound(res, res.win ? `WON x${r.segment_multiplier}` : 'NO WIN');
       }, 2650);
@@ -641,100 +712,55 @@ const runAnimationFor = (res: any) => {
         if (ticks > 14) { clearInterval(multTimer.current); multTimer.current = null; setLiveMult(String(r.roll)); finishRound(res, `ROLLED ${r.roll}`); }
       }, 70);
 } else if (gt === 'plinko') {
-  const slot = Math.max(0, Math.min(8, Number(r.slot ?? 4)));
+  const slot = Math.max(0, Math.min(14, Number(r.slot ?? 7)));
+  const rawPath = Array.isArray(r.path) ? r.path : [];
+  // Use the exact left/right bounce sequence generated by the backend.
+  // Fallback only supports older server versions while they are being updated.
+  const directions: number[] = rawPath.length === 14
+    ? rawPath.map((step: unknown) => step === 'R' || step === 1 ? 1 : -1)
+    : Array.from({ length: 14 }, (_, i) => (i < slot ? 1 : -1));
 
-  // Reset
   plinkoX.value = 0;
   plinkoY.value = 0;
   plinkoScale.value = 1;
+  plinkoOpacity.value = 1;
 
-  /*
-   * 8 bounce decisions.
-   * The server result decides the final slot.
-   * This only animates the visual path to that slot.
-   */
-  const targetX = (slot - 4) * 30;
-
-  const directions: number[] = [];
-  let currentX = 0;
-
-  for (let i = 0; i < 8; i++) {
-    const remaining = 8 - i;
-    const distance = targetX - currentX;
-
-    let direction =
-      distance > 8 ? 1 :
-      distance < -8 ? -1 :
-      Math.random() > 0.5 ? 1 : -1;
-
-    // Near the end, guide the animation toward the server slot.
-    if (remaining <= 2) {
-      direction = distance >= 0 ? 1 : -1;
-    }
-
-    directions.push(direction);
-    currentX += direction * 30;
-  }
-
-  // Correct final visual position.
-  const correction = targetX - currentX;
-
-  plinkoY.value = withTiming(0, { duration: 1 });
-
-  // Bounce down through the peg rows.
   const xAnimations: any[] = [];
   const yAnimations: any[] = [];
-
   let x = 0;
-
-  for (let i = 0; i < directions.length; i++) {
-    const dx = directions[i] * 30;
-    x += dx;
-
-    xAnimations.push(
-      withTiming(x, {
-        duration: 220,
+  for (let i = 0; i < 14; i++) {
+    x += directions[i] * 11;
+    // Each step moves down one peg row, with a short bounce before contact.
+    xAnimations.push(withTiming(x, {
+      duration: 125,
+      easing: Easing.out(Easing.quad),
+    }));
+    yAnimations.push(withSequence(
+      withTiming((i + 1) * 15.5 - 3, {
+        duration: 48,
         easing: Easing.out(Easing.quad),
+      }),
+      withTiming((i + 1) * 15.5, {
+        duration: 77,
+        easing: Easing.in(Easing.quad),
       })
-    );
-
-    // Small vertical bounce between pegs.
-    yAnimations.push(
-      withTiming((i + 1) * 31 - 7, {
-        duration: 200,
-        easing: Easing.inOut(Easing.quad),
-      })
-    );
+    ));
   }
 
-  // Final correction to exact slot.
-  xAnimations.push(
-    withTiming(targetX, {
-      duration: 250,
-      easing: Easing.out(Easing.quad),
-    })
-  );
+  // Settle into the exact bin associated with the same backend path.
+  const targetX = (slot - 7) * 22;
+  xAnimations.push(withTiming(targetX, { duration: 130, easing: Easing.out(Easing.quad) }));
+  yAnimations.push(withTiming(218, { duration: 130, easing: Easing.in(Easing.quad) }));
 
-  yAnimations.push(
-    withTiming(285, {
-      duration: 250,
-      easing: Easing.in(Easing.quad),
-    })
-  );
-
-  plinkoX.value = xAnimations.length
-    ? withSequence(...xAnimations)
-    : withTiming(correction);
-
+  plinkoX.value = withSequence(...xAnimations);
   plinkoY.value = withSequence(...yAnimations);
-
   plinkoScale.value = withSequence(
-    withTiming(1.15, { duration: 90 }),
-    withTiming(0.92, { duration: 100 }),
-    withTiming(1, { duration: 100 })
+    withTiming(1.12, { duration: 80 }),
+    withTiming(0.94, { duration: 90 }),
+    withTiming(1, { duration: 90 })
   );
+  plinkoOpacity.value = withDelay(1900, withTiming(0, { duration: 120 }));
 
-  // Result after ball reaches bottom.
   cdTimer.current = setTimeout(() => {
     try {
       Haptics.notificationAsync(
@@ -743,9 +769,8 @@ const runAnimationFor = (res: any) => {
           : Haptics.NotificationFeedbackType.Warning
       );
     } catch {}
-
-    finishRound(res, `x${r.multiplier}`);
-  }, 1250);
+    finishRound(res, `x${Number(r.multiplier ?? 0).toFixed(2)}`);
+  }, 2050);
 
 
     } else if (gt === 'mines') {
@@ -780,7 +805,7 @@ const runAnimationFor = (res: any) => {
     if (climbTimer.current) { clearInterval(climbTimer.current); climbTimer.current = null; }
     if (pollTimer.current) { clearInterval(pollTimer.current); pollTimer.current = null; }
     setFlying(false);
-    bgShift.value = withTiming(0, { duration: 300 });
+    bgShift.value = withTiming(0, { duration: 100 });
   };
 
   const onCrash = (crashPoint?: number) => {
@@ -789,7 +814,7 @@ const runAnimationFor = (res: any) => {
     endCrashRound();
     try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error); } catch {}
     shake.value = withSequence(withTiming(-10, { duration: 60 }), withTiming(10, { duration: 60 }), withTiming(0, { duration: 60 }));
-    glowIntensity.value = withTiming(0, { duration: 300 });
+    glowIntensity.value = withTiming(0, { duration: 100 });
     // explosion: drop back down
    
     setResult({ win: false, payout: 0, result: {} });
@@ -991,7 +1016,11 @@ console.log(
   JSON.stringify(res, null, 2)
 );
 
-setBalance(Number(res?.balance ?? balance ?? 0));
+// Spin wallet display must stay unchanged while the wheel is animating.
+// Its returned balance is applied inside the spin result-reveal timeout.
+if (gt !== 'spin') {
+  setBalance(Number(res?.balance ?? balance ?? 0));
+}
 
 // ================================
 // ANDAR BAHAR NORMALIZATION
@@ -1228,6 +1257,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
 
   const ballStyle = useAnimatedStyle(() => ({
+  opacity: plinkoOpacity.value,
   transform: [
     { translateX: plinkoX.value },
     { translateY: plinkoY.value },
@@ -1238,8 +1268,8 @@ const cardStyle3 = useAnimatedStyle(() => ({
   const resultStyle = useAnimatedStyle(() => ({ transform: [{ scale: resultPulse.value }] }));
 
   return (
-    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: colors.surfaceSecondary }}>
-      <LinearGradient colors={[meta.color + 'DD', meta.color]}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: '#070914' }}>
+      <LinearGradient colors={['#090B1B', '#17102F', '#062A35']} locations={[0, 0.55, 1]}>
         <SafeAreaView edges={['top']} style={styles.h}>
           <Pressable onPress={() => router.back()} testID="game-back"><Ionicons name="chevron-back" size={22} color="#fff" /></Pressable>
           <Text style={styles.title}>{meta.title}</Text>
@@ -1250,13 +1280,15 @@ const cardStyle3 = useAnimatedStyle(() => ({
         </SafeAreaView>
       </LinearGradient>
 
-      <ScrollView contentContainerStyle={{ padding: spacing.lg }} keyboardShouldPersistTaps="handled">
-        {/* Live bet feed */}
-        <LiveBetFeed game={gt} />
+      <ScrollView style={{ backgroundColor: '#070914' }} contentContainerStyle={{ padding: spacing.lg, paddingBottom: 36 }} keyboardShouldPersistTaps="handled">
+        {/* Live wins feed: keep the container neutral; RGB styling belongs on each name chip inside LiveBetFeed. */}
+        <View style={{ marginBottom: 10, borderRadius: 13, overflow: 'hidden', backgroundColor: '#090B1B' }}>
+          <LiveBetFeed game={gt} />
+        </View>
         {/* Game stage */}
         <View style={styles.stage}>
           <LinearGradient 
-          colors={['#1F2937', '#111827']} 
+          colors={['#080D22', '#11112B', '#071D2B']} 
            style={[
             styles.stageBg,  
             (gt === 'aviator' || gt === 'crash') && styles.crashAviatorStage
@@ -1317,7 +1349,13 @@ const cardStyle3 = useAnimatedStyle(() => ({
                       <Ionicons name={meta.icon} size={72} color="#fff" />
                     )}
                     </Animated.View>
-                    {(flying || busy) && <Text style={[styles.liveMult, !flying && result && !result.win && { color: '#FF4D4F' }]}>{liveMult}x</Text>}
+                    {(flying || busy) && liveStatus !== 'crashed' && <Text style={styles.liveMult}>{liveMult}x</Text>}
+
+                    {liveStatus === 'crashed' && (
+                      <View pointerEvents="none" style={styles.crashedCenterOverlay}>
+                        <Text style={styles.crashedCenterText}>CRASHED</Text>
+                      </View>
+                    )}
                   </>
                 )}
 
@@ -2456,8 +2494,9 @@ const cardStyle3 = useAnimatedStyle(() => ({
     {/* Actual peg board */}
     <View style={styles.plinkoPegArea}>
 
-      {Array.from({ length: 9 }).map((_, row) => {
-        const pegCount = row + 1;
+      {Array.from({ length: 14 }).map((_, row) => {
+        // 14 rows: two top-side pegs anchor the sloping triangle edges; each row below adds one peg.
+        const pegCount = row + 2;
 
         return (
           <View
@@ -2466,8 +2505,8 @@ const cardStyle3 = useAnimatedStyle(() => ({
               styles.plinkoPegRow,
               {
                 width: Math.min(
-                  310,
-                  30 + pegCount * 31
+                  340,
+                  34 + pegCount * 22
                 ),
               },
             ]}
@@ -2496,102 +2535,32 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
     </View>
 
-    {/* Bottom slots */}
-    {/* Result rows */}
-<View style={styles.plinkoResultRows}>
-
-  {/* MULTIPLIER ROW */}
-  <View style={styles.plinkoSlots}>
-    {[10, 4, 2, 1.2, 0.5, 1.2, 2, 4, 10].map(
-      (m, i) => {
-
-        const selected =
-          result?.result?.slot === i &&
-          !busy;
-
-        return (
-          <View
-            key={`plinko-slot-${i}`}
-            style={[
-              styles.plinkoSlotNew,
-              selected &&
-                styles.plinkoSlotWinner,
-            ]}
-          >
-            <Text
-              style={[
-                styles.plinkoSlotText,
-                selected &&
-                  styles.plinkoSlotWinnerText,
-              ]}
+    {/* One real landing-bin row: 15 bins for 14 peg rows */}
+    <View style={styles.plinkoResultRows}>
+      <View style={styles.plinkoSlots}>
+        {[5, 2, 1.8, 1.5, 1.2, 0.8, 0.5, 0.2, 0.5, 0.8, 1.2, 1.5, 1.8, 2, 5].map((m, i) => {
+          const selected = Number(result?.result?.slot) === i && !busy;
+          return (
+            <View
+              key={`plinko-slot-${i}`}
+              style={[styles.plinkoSlotNew, selected && styles.plinkoSlotWinner]}
             >
-              {m}x
-            </Text>
-          </View>
-        );
-      }
-    )}
-  </View>
-
-  {/* LOSE ROW */}
-  <View style={styles.plinkoLoseSlots}>
-  {[4, 3, 2, 1.5, 1, 1.5, 2, 3, 4].map(
-    (m, i) => {
-
-      const selected =
-        result?.result?.slot === i &&
-        !busy;
-
-      return (
-        <View
-          key={`plinko-second-slot-${i}`}
-          style={[
-            styles.plinkoLoseSlot,
-            selected &&
-              styles.plinkoLoseSlotActive,
-          ]}
-        >
-          <Text
-            style={[
-              styles.plinkoLoseText,
-              selected &&
-                styles.plinkoLoseTextActive,
-            ]}
-          >
-            {m}x
+              <Text style={[styles.plinkoSlotText, selected && styles.plinkoSlotWinnerText]}>
+                {m}x
+              </Text>
+            </View>
+          );
+        })}
+      </View>
+      {!busy && result?.result?.slot !== undefined && (
+        <View style={styles.plinkoFinalResult}>
+          <Text style={styles.plinkoFinalResultLabel}>LANDING</Text>
+          <Text style={styles.plinkoFinalResultValue}>
+            {Number(result?.result?.multiplier ?? 0).toFixed(2).replace(/\.00$/, '')}x
           </Text>
         </View>
-      );
-    }
-  )}
-</View>
-
- {/* FINAL RESULT */}
-  {!busy && result?.result?.slot !== undefined && (
-    <View style={styles.plinkoFinalResult}>
-      <Text style={styles.plinkoFinalResultLabel}>
-        FINAL
-      </Text>
-
-      <Text style={styles.plinkoFinalResultValue}>
-        {Math.max(
-          0,
-          (
-            [10, 4, 2, 1.2, 0.5, 1.2, 2, 4, 10][
-              Number(result.result.slot)
-            ] -
-            [4, 3, 2, 1.5, 1, 1.5, 2, 3, 4][
-              Number(result.result.slot)
-            ]
-          ).toFixed(2)
-        )}x
-      </Text>
+      )}
     </View>
-  )}
-
-
-
-</View>
 </View>
 )}
 
@@ -2680,19 +2649,43 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
         {/* Controls */}
         <View style={styles.controls}>
-          <Text style={styles.label}>Bet Amount (₹)</Text>
-          <TextInput testID="game-bet" style={inputStyle.base} value={bet} onChangeText={setBet} keyboardType="number-pad" editable={!busy} />
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginTop: 10 }}>
-            {[10, 50, 100, 500, 1000].map((v, i) => {
-              const chipColors = ['#2ECA7F', '#5B8CFF', '#8B5CF6', '#FFB020', '#FF4D4F'];
-              const isSelected = bet === String(v);
-              return (
-                <Pressable key={v} disabled={busy} onPress={() => setBet(String(v))} style={[styles.chip, { backgroundColor: chipColors[i] }, isSelected && { borderColor: '#FFD700', borderStyle: 'solid' }]} testID={`bet-${v}`}>
-                  <Text style={styles.chipText}>{v >= 1000 ? `${v / 1000}K` : v}</Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+          {(!busy && !(isCrash && myLiveBetPlaced) && !(isDragonTiger && dtBetPlaced)) && (
+            <>
+              <Text style={styles.label}>Bet Amount (₹)</Text>
+              <TextInput
+                testID="game-bet"
+                style={inputStyle.base}
+                value={bet}
+                onChangeText={setBet}
+                keyboardType="number-pad"
+                editable={!busy}
+                placeholder="Enter bet amount"
+                placeholderTextColor="#8A91A8"
+              />
+            </>
+          )}
+
+          {/* Bet coins stay available before a round, hide after bet placement,
+              and return when the next round opens. */}
+          {!busy && !(isCrash && myLiveBetPlaced) && !(isDragonTiger && dtBetPlaced) && (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginTop: 10 }}>
+              {[10, 50, 100, 500, 1000].map((v, i) => {
+                const chipColors = ['#2ECA7F', '#5B8CFF', '#8B5CF6', '#FFB020', '#FF4D4F'];
+                const isSelected = bet === String(v);
+                return (
+                  <Pressable
+                    key={v}
+                    disabled={busy}
+                    onPress={() => setBet(String(v))}
+                    style={[styles.chip, { backgroundColor: chipColors[i] }, isSelected && { borderColor: '#FFD700', borderStyle: 'solid' }]}
+                    testID={`bet-${v}`}
+                  >
+                    <Text style={styles.chipText}>{v >= 1000 ? `${v / 1000}K` : v}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          )}
 
           {(gt === 'crash' || gt === 'aviator') && (
             <View style={{ marginTop: 12 }}>
@@ -2804,7 +2797,7 @@ function labelFor(gt: string, res: any): string {
 function ComingSoon({ router }: any) {
   const { title } = useLocalSearchParams<{ title: string }>();
   return (
-    <View style={{ flex: 1, backgroundColor: colors.surfaceSecondary }}>
+    <View style={{ flex: 1, backgroundColor: '#070914' }}>
       <LinearGradient colors={['#FFB99D', '#FF6B6B']}>
         <SafeAreaView edges={['top']} style={{ flexDirection: 'row', alignItems: 'center', padding: spacing.lg, justifyContent: 'space-between' }}>
           <Pressable onPress={() => router.back()}><Ionicons name="chevron-back" size={22} color="#fff" /></Pressable>
@@ -2822,16 +2815,38 @@ function ComingSoon({ router }: any) {
 }
 
 const styles = StyleSheet.create({
-  h: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: spacing.lg },
-  title: { color: '#fff', fontSize: 18, fontWeight: '800' },
-  stage: { borderRadius: radius.lg, marginBottom: spacing.md, borderWidth: 2, borderColor: '#FFD700', ...shadows.strong },
-  stageBg: { minHeight: 260, alignItems: 'center', justifyContent: 'center', position: 'relative' },
+  h: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: spacing.lg, minHeight: 64 },
+  title: { color: '#FFFFFF', fontSize: 19, fontWeight: '900', letterSpacing: 1.1, textShadowColor: '#00E5FF', textShadowRadius: 10 },
+  stage: { borderRadius: 22, marginBottom: spacing.md, borderWidth: 1.5, borderColor: '#00E5FF', overflow: 'hidden', backgroundColor: '#090D20', shadowColor: '#00D9FF', shadowOpacity: 0.55, shadowRadius: 16, shadowOffset: { width: 0, height: 0 }, elevation: 12 },
+  stageBg: { minHeight: 260, alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' },
   display: { position: 'absolute', top: 16, right: 16, color: '#fff', fontWeight: '800', fontSize: 16, letterSpacing: 0.5 },
   statusBadge: { position: 'absolute', top: 16, left: 16, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.4)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999 },
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#2ECA7F' },
   statusText: { color: '#fff', fontWeight: '800', fontSize: 11, letterSpacing: 0.5 },
-  countdown: { color: '#fff', fontSize: 90, fontWeight: '800' },
-  liveMult: { position: 'absolute', color: '#FFD700', fontSize: 34, fontWeight: '800' },
+  countdown: { color: '#FFFFFF', fontSize: 90, fontWeight: '900', textShadowColor: '#00D9FF', textShadowRadius: 24, textShadowOffset: { width: 0, height: 0 } },
+  liveMult: { position: 'absolute', color: '#6BFFF1', fontSize: 36, fontWeight: '900', textShadowColor: '#00E5FF', textShadowRadius: 18, letterSpacing: 0.5 },
+  crashedCenterOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 50,
+    elevation: 50,
+  },
+  crashedCenterText: {
+    color: '#FF3434',
+    fontSize: 34,
+    fontWeight: '900',
+    letterSpacing: 3,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0,0,0,0.9)',
+    textShadowOffset: { width: 1, height: 2 },
+    textShadowRadius: 8,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
   bigNumber: { color: '#FFD700', fontSize: 90, fontWeight: '800' },
   pointer: { position: 'absolute', top: 5, zIndex: 2, width: 0, height: 0, borderLeftWidth: 8, borderRightWidth: 8, borderTopWidth: 16, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#fff' },
   wheel: { width: 172, height: 172, borderRadius: 86, backgroundColor: '#fff', overflow: 'hidden', alignItems: 'center', justifyContent: 'center', borderWidth: 4, borderColor: '#fff' },
@@ -3270,11 +3285,11 @@ abWinnerSub: {
   plinkoSlot: { width: 24, height: 26, borderRadius: 6, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
   plinkoBoard: {
   width: '100%',
-  height: 400,
-  borderRadius: 18,
-  backgroundColor: '#07152F',
-  borderWidth: 2,
-  borderColor: '#315FA8',
+  height: 465,
+  borderRadius: 24,
+  backgroundColor: '#071020',
+  borderWidth: 1,
+  borderColor: '#38D9FF',
   overflow: 'hidden',
   paddingTop: 0,
 },
@@ -3345,14 +3360,14 @@ plinkoDropArrow: {
 
 plinkoPegArea: {
   width: '100%',
-  height: 173,
+  height: 218,
   alignItems: 'center',
   justifyContent: 'flex-start',
   position: 'relative',
 },
 
 plinkoPegRow: {
-  height: 18,
+  height: 15.5,
   flexDirection: 'row',
   alignItems: 'center',
   justifyContent: 'space-between',
@@ -3362,23 +3377,29 @@ plinkoPeg: {
   width: 9,
   height: 9,
   borderRadius: 4.5,
-  backgroundColor: '#DDEAFF',
+  backgroundColor: '#56E6FF',
   borderWidth: 1,
-  borderColor: '#FFFFFF',
-  shadowColor: '#5B8CFF',
+  borderColor: '#F4FEFF',
+  shadowColor: '#21CFFF',
   shadowOpacity: 0.75,
   shadowRadius: 5,
   elevation: 5,
+},
+
+plinkoSidePeg: {
+  position: 'absolute',
+  right: 13,
+  top: 15,
 },
 
 plinkoBall: {
   position: 'absolute',
   top: 3,
   left: '50%',
-  marginLeft: -11,
-  width: 22,
-  height: 22,
-  borderRadius: 11,
+  marginLeft: -8,
+  width: 16,
+  height: 16,
+  borderRadius: 8,
   backgroundColor: '#FFD000',
   borderWidth: 2,
   borderColor: '#FFF2A0',
@@ -3391,28 +3412,28 @@ plinkoBall: {
 },
 
 plinkoBallHighlight: {
-  width: 7,
-  height: 7,
-  borderRadius: 4,
+  width: 5,
+  height: 5,
+  borderRadius: 3,
   backgroundColor: '#FFF9C4',
 },
 
 plinkoSlots: {
   width: '94%',
-  height: 43,
+  height: 34,
   alignSelf: 'center',
   flexDirection: 'row',
-  gap: 3,
+  gap: 2,
   alignItems: 'center',
 },
 
 plinkoSlotNew: {
   flex: 1,
-  height: 38,
-  borderRadius: 7,
-  backgroundColor: '#182A50',
+  height: 28,
+  borderRadius: 4,
+  backgroundColor: '#12243D',
   borderWidth: 1,
-  borderColor: '#31558E',
+  borderColor: '#2B789A',
   alignItems: 'center',
   justifyContent: 'center',
 },
@@ -3431,7 +3452,7 @@ plinkoSlotWinner: {
 
 plinkoSlotText: {
   color: '#FFFFFF',
-  fontSize: 9,
+  fontSize: 7,
   fontWeight: '900',
 },
 
@@ -3444,11 +3465,12 @@ plinkoSlotWinnerText: {
 plinkoResultRows: {
   width: '94%',
   alignSelf: 'center',
+  marginTop: 20,
 },
 
 plinkoLoseSlots: {
   width: '100%',
-  height: 43,
+  height: 34,
   flexDirection: 'row',
   gap: 3,
   alignItems: 'center',
@@ -3457,7 +3479,7 @@ plinkoLoseSlots: {
 
 plinkoLoseSlot: {
   flex: 1,
-  height: 38,
+  height: 30,
   borderRadius: 7,
   backgroundColor: '#3A1720',
   borderWidth: 1,
@@ -3467,15 +3489,9 @@ plinkoLoseSlot: {
 },
 
 plinkoLoseSlotActive: {
-  backgroundColor: '#FF4D5F',
-  borderColor: '#FF9AA5',
-  transform: [
-    { scale: 1.08 },
-  ],
-  shadowColor: '#FF4D5F',
-  shadowOpacity: 0.9,
-  shadowRadius: 8,
-  elevation: 8,
+  // Keep the lower multiplier row visually normal: no glow or scaling.
+  backgroundColor: '#3A1720',
+  borderColor: '#71313F',
 },
 
 plinkoLoseText: {
@@ -3523,20 +3539,19 @@ plinkoFinalResultValue: {
   slot: { width: 60, height: 72, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' },
   slotText: { color: '#fff', fontSize: 26, fontWeight: '800' },
   ring: {},
-  historyCard: { backgroundColor: '#fff', borderRadius: radius.lg, padding: spacing.md, marginBottom: spacing.md, ...shadows.card },
-  historyLabel: { fontSize: 13, fontWeight: '700', color: colors.onSurfaceSecondary, marginBottom: 10 },
-  historyRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
-  histChip: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff', ...shadows.soft },
+  historyCard: { backgroundColor: '#101326', borderRadius: 12, paddingVertical: 6, paddingHorizontal: 10, marginBottom: spacing.sm, borderWidth: 1, borderColor: 'rgba(0,229,255,0.28)' },
+  historyLabel: { fontSize: 11, fontWeight: '700', color: colors.onSurfaceSecondary, marginBottom: 4 },
+  historyRow: { flexDirection: 'row', gap: 4, flexWrap: 'wrap' },
+  histChip: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#fff' },
   histText: { fontWeight: '800', fontSize: 13, color: '#fff' },
   resultBox: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderRadius: radius.lg, marginBottom: spacing.md },
   resultText: { fontSize: 15, fontWeight: '800' },
   errorBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FDECEC', padding: 12, borderRadius: radius.md, marginBottom: spacing.md },
   errorText: { color: '#FF4D4F', fontWeight: '700', flex: 1 },
-  controls: { backgroundColor: '#fff', borderRadius: radius.lg, padding: spacing.lg, ...shadows.card },
-  label: { fontSize: 13, fontWeight: '700', color: colors.onSurfaceSecondary, marginBottom: 8 },
+  controls: { backgroundColor: '#101326', borderRadius: 20, padding: spacing.lg, borderWidth: 1, borderColor: 'rgba(139,92,255,0.48)', shadowColor: '#00D9FF', shadowOpacity: 0.18, shadowRadius: 12, elevation: 5 },
+  label: { fontSize: 12, fontWeight: '900', color: '#AAB5D6', marginBottom: 8, letterSpacing: 0.7 },
   chip: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: '#fff', borderStyle: 'dashed', ...shadows.strong },
-  chipText: { fontWeight: '800', color: '#fff', fontSize: 12 },
-  chipText: { fontWeight: '800', color: colors.onSurface },
+  chipText: { fontWeight: '800', color: colors.onSurface, fontSize: 12 },
   pickBtn: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12, backgroundColor: colors.surfaceSecondary, borderWidth: 1, borderColor: colors.border },
   pickActive: { backgroundColor: colors.brandPrimary, borderColor: colors.brandPrimary },
   pickText: { fontWeight: '800', color: colors.onSurface },

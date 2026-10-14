@@ -30,7 +30,7 @@ const GAMES = [
   { id: 'teenpatti', title: 'Teen Patti', tag: 'cards', icon: 'grid', color: '#E53935', playable: true, image: require('../../assets/images/teen-bg.png') },
   { id: 'number-king', title: 'Number King', tag: 'number', icon: 'apps', color: '#FF7E67', playable: true, image: require('../../assets/images/king-bg.png') },
   { id: 'plinko', title: 'Plinko', tag: 'arcade', icon: 'game-controller', color: '#FF9A9E', playable: true, image: require('../../assets/images/plinko-bg.png') },
-  { id: 'cricket', title: 'cricket', tag: 'live', icon: 'game-live', color: '#FF9A9E', playable: true },
+  { id: 'fantasy-cricket', title: 'Fantasy Cricket', tag: 'skill', icon: 'trophy', color: '#16A34A', playable: true, image: require('../../assets/images/cricket-bg.png') },
   { id: 'mines', title: 'Mines', tag: 'arcade', icon: 'flame', color: '#FF6B6B', playable: true, image: require('../../assets/images/mines-bg.png') },
   { id: 'sudoku', title: 'Sudoku', tag: 'puzzle', icon: 'grid-outline', color: '#5B8CFF', playable: true, image: require('../../assets/images/sudoku-bg.png') },
   { id: 'match3', title: 'Match Three', tag: 'casual', icon: 'shapes', color: '#FFB020', playable: true, image: require('../../assets/images/match-bg.png') },
@@ -100,7 +100,7 @@ export default function Games() {
             <Pressable
               key={g.id}
               testID={`game-${g.id}`}
-              onPress={() => (g.playable ? router.push(`/game/${g.id}`) : router.push({ pathname: '/game/coming-soon', params: { title: g.title } }))}
+              onPress={() => { if (g.id === 'fantasy-cricket') { router.push('/fantasy-cricket'); return; } if (g.playable) { router.push(`/game/${g.id}`); return; } router.push({ pathname: '/game/coming-soon', params: { title: g.title } }); }}
               style={styles.card}
             >
               <ImageBackground

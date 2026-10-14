@@ -1,5 +1,7 @@
 import React, { useCallback, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, ImageBackground } from 'react-native';
+import {
+  View, Text, StyleSheet, ScrollView, Pressable, ImageBackground, Linking, Alert,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -16,30 +18,43 @@ export default function Rewards() {
   const load = useCallback(async () => {
     try {
       const [v, p, m] = await Promise.all([api.vip(), api.promotions(), api.me()]);
-      setVip(v); setPromos(p); setMe(m);
-    } catch {}
+      setVip(v);
+      setPromos(p);
+      setMe(m);
+    } catch (error) {
+      console.warn('Failed to load rewards data:', error);
+    }
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  const shareReferral = useCallback(async () => {
+    const referralCode = String(me?.referral_code ?? '').trim();
+
+    if (!referralCode) {
+      Alert.alert('Referral Code Unavailable', 'Your referral code could not be loaded. Please refresh the page and try again.');
+      return;
+    }
+
+    const message =
+      `🎮 Join me on Villain Game!\n\n` +
+      `Use my referral code: ${referralCode}\n\n` +
+      `🎁 Invite friends and earn rewards!\n\n` +
+      `Download the app and enter my referral code during registration.`;
+
+    const whatsappUrl = `https://wa.me/?text=${encodeURIComponent(message)}`;
+    try {
+      await Linking.openURL(whatsappUrl);
+    } catch {
+      Alert.alert('Unable to Open WhatsApp', 'Please install WhatsApp or check your internet connection.');
+    }
+  }, [me?.referral_code]);
+
   const currentTier = vip?.tiers?.find((t: any) => t.id === vip?.current);
 
   return (
-    <ImageBackground
-     source={require('../../assets/images/games-bg.png')}
-     style={styles.screen}
-     imageStyle={styles.screenBg}
-     resizeMode="cover"
-    >
-      <ImageBackground
-       source={require('../../assets/images/header-bg.png')}
-       style={styles.header}
-       imageStyle={{
-        width: '100%',
-        height: '100%',
-       }}
-        resizeMode="cover"
-      >
+    <ImageBackground source={require('../../assets/images/games-bg.png')} style={styles.screen} imageStyle={styles.screenBg} resizeMode="cover">
+      <ImageBackground source={require('../../assets/images/header-bg.png')} style={styles.header} imageStyle={{ width: '100%', height: '100%' }} resizeMode="cover">
         <SafeAreaView edges={['top']} style={{ paddingHorizontal: spacing.lg, paddingTop: spacing.sm }}>
           <Text style={styles.title}>Rewards & VIP</Text>
           <Text style={styles.sub}>Play more. Earn more.</Text>
@@ -74,16 +89,17 @@ export default function Rewards() {
 
         <Text style={styles.section}>Promotions & Referral</Text>
         <View style={{ paddingHorizontal: spacing.lg, gap: 10 }}>
-          <Pressable testID="referral-card" style={styles.refCard} onPress={() => {}}>
+          <Pressable testID="referral-card" style={styles.refCard} onPress={shareReferral} accessibilityRole="button" accessibilityLabel="Share your referral code on WhatsApp">
             <LinearGradient colors={['#FF9A9E', '#FF6B6B']} style={styles.refInner}>
               <View style={{ flex: 1 }}>
                 <Text style={{ color: '#fff', fontSize: 16, fontWeight: '800' }}>Your Referral Code</Text>
                 <Text style={{ color: '#fff', fontSize: 24, fontWeight: '800', marginTop: 4, letterSpacing: 1 }}>{me?.referral_code || '—'}</Text>
-                <Text style={{ color: 'rgba(255,255,255,0.9)', fontSize: 12, marginTop: 4 }}>Invite friends, earn ₹250 each</Text>
+                <Text style={{ color: 'rgba(255,255,255,0.9)', fontSize: 12, marginTop: 4 }}>Tap to share on WhatsApp · Invite friends, earn ₹250 each</Text>
               </View>
-              <Ionicons name="share-social" size={30} color="#fff" />
+              <Ionicons name="logo-whatsapp" size={30} color="#fff" />
             </LinearGradient>
           </Pressable>
+
           {promos.map(p => (
             <View key={p.id} style={styles.promo} testID={`promo-${p.code}`}>
               <View style={styles.promoIcon}><Ionicons name="pricetag" size={20} color="#FF6B6B" /></View>
@@ -101,17 +117,8 @@ export default function Rewards() {
 }
 
 const styles = StyleSheet.create({
-  screen: {
-  flex: 1,
-  width: '100%',
-  minWidth: 0,
-  backgroundColor: '#050814',
-},
-
-screenBg: {
-  width: '100%',
-  height: '100%',
-},
+  screen: { flex: 1, width: '100%', minWidth: 0, backgroundColor: '#050814' },
+  screenBg: { width: '100%', height: '100%' },
   header: { borderBottomLeftRadius: 24, borderBottomRightRadius: 24, paddingBottom: spacing.xxl },
   title: { color: '#fff', fontSize: 24, fontWeight: '800' },
   sub: { color: 'rgba(255,255,255,0.9)', marginTop: 4, fontSize: 13 },
