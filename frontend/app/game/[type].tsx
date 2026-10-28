@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, KeyboardAvoidingView, Platform, AccessibilityInfo } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, KeyboardAvoidingView, Platform, AccessibilityInfo, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -87,6 +87,8 @@ function Particle({ index, color }: { index: number; color: string }) {
 }
 
 export default function GameScreen() {
+  const { width: screenWidth } = useWindowDimensions();
+  const responsiveScale = Math.min(1, Math.max(0.78, (screenWidth - 24) / 360));
   const router = useRouter();
   const { type } = useLocalSearchParams<{ type: string }>();
   const gt = String(type || 'crash');
@@ -1347,13 +1349,13 @@ const cardStyle3 = useAnimatedStyle(() => ({
         </SafeAreaView>
       </LinearGradient>
 
-      <ScrollView style={{ backgroundColor: '#070914' }} contentContainerStyle={{ padding: spacing.lg, paddingBottom: 36 }} keyboardShouldPersistTaps="handled">
+      <ScrollView style={{ flex: 1, width: '100%', backgroundColor: '#070914' }} contentContainerStyle={{ paddingHorizontal: 10, paddingTop: 10, paddingBottom: 28, alignItems: 'stretch', width: '100%' }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
         {/* Live wins feed: keep the container neutral; RGB styling belongs on each name chip inside LiveBetFeed. */}
         <View style={{ marginBottom: 10, borderRadius: 13, overflow: 'hidden', backgroundColor: '#090B1B' }}>
           <LiveBetFeed game={gt} />
         </View>
         {/* Game stage */}
-        <View style={styles.stage}>
+        <View style={[styles.stage, { width: '100%', alignSelf: 'center' }]}>
           <LinearGradient 
           colors={['#080D22', '#11112B', '#071D2B']} 
            style={[
@@ -1411,7 +1413,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
                       {gt === 'aviator' ? (
                       <Image source={require('../../assets/images/plane.png')} style={{ width: 90, height: 90, resizeMode: 'contain' }} />
                     ) : gt === 'crash' ? (
-                      <Image source={require('../../assets/images/rocket.png')} style={{ width: 100, height: 100, resizeMode: 'contain' }} />
+                      <Image source={require('../../assets/images/rocket.png')} style={{ width: 90, height: 90, resizeMode: 'contain' }} />
                     ) : (
                       <Ionicons name={meta.icon} size={72} color="#fff" />
                     )}
@@ -1741,6 +1743,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
       style={{
         width: 222,
         height: 222,
+        transform: [{ scale: responsiveScale }],
         borderRadius: 111,
         backgroundColor: '#FFD700',
         padding: 7,
@@ -2521,7 +2524,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
                 {gt === 'number-king' && (
                   <View style={{ alignItems: 'center' }}>
-                    <Text style={styles.bigNumber} testID="number-roll">{busy ? liveMult : (result?.result?.roll ?? '?')}</Text>
+                    <Text style={[styles.bigNumber, { fontSize: Math.round(90 * responsiveScale) }]} testID="number-roll">{busy ? liveMult : (result?.result?.roll ?? '?')}</Text>
                     <Text style={{ color: '#fff', fontWeight: '700' }}>Your pick: {numberPick}</Text>
                   </View>
                 )}
@@ -2881,8 +2884,8 @@ function ComingSoon({ router }: any) {
 const styles = StyleSheet.create({
   h: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: spacing.lg, minHeight: 64 },
   title: { color: '#FFFFFF', fontSize: 19, fontWeight: '900', letterSpacing: 1.1, textShadowColor: '#00E5FF', textShadowRadius: 10 },
-  stage: { borderRadius: 22, marginBottom: spacing.md, borderWidth: 1.5, borderColor: '#00E5FF', overflow: 'hidden', backgroundColor: '#090D20', shadowColor: '#00D9FF', shadowOpacity: 0.55, shadowRadius: 16, shadowOffset: { width: 0, height: 0 }, elevation: 12 },
-  stageBg: { minHeight: 260, alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' },
+  stage: { maxWidth: '100%', borderRadius: 18, marginBottom: spacing.md, borderWidth: 1.5, borderColor: '#00E5FF', overflow: 'hidden', backgroundColor: '#090D20', shadowColor: '#00D9FF', shadowOpacity: 0.55, shadowRadius: 16, shadowOffset: { width: 0, height: 0 }, elevation: 12 },
+  stageBg: { width: '100%', minHeight: 230, alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' },
   display: { position: 'absolute', top: 16, right: 16, color: '#fff', fontWeight: '800', fontSize: 16, letterSpacing: 0.5 },
   statusBadge: { position: 'absolute', top: 16, left: 16, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.4)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999 },
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#2ECA7F' },
@@ -3349,8 +3352,10 @@ abWinnerSub: {
   plinkoSlot: { width: 24, height: 26, borderRadius: 6, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
   plinkoBoard: {
   width: '100%',
-  height: 465,
-  borderRadius: 24,
+  height: 440,
+  maxWidth: '100%',
+  alignSelf: 'center',
+  borderRadius: 20,
   backgroundColor: '#071020',
   borderWidth: 1,
   borderColor: '#38D9FF',
@@ -3424,7 +3429,7 @@ plinkoDropArrow: {
 
 plinkoPegArea: {
   width: '100%',
-  height: 218,
+  height: 204,
   alignItems: 'center',
   justifyContent: 'flex-start',
   position: 'relative',
@@ -3438,9 +3443,9 @@ plinkoPegRow: {
 },
 
 plinkoPeg: {
-  width: 9,
-  height: 9,
-  borderRadius: 4.5,
+  width: 7,
+  height: 7,
+  borderRadius: 3.5,
   backgroundColor: '#56E6FF',
   borderWidth: 1,
   borderColor: '#F4FEFF',
