@@ -87,7 +87,10 @@ function Particle({ index, color }: { index: number; color: string }) {
 }
 
 export default function GameScreen() {
-  const { width: screenWidth } = useWindowDimensions();
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const [gameContentHeight, setGameContentHeight] = useState(0);
+  const availableGameHeight = Math.max(300, screenHeight - 155);
+  const fitScale = gameContentHeight > 0 ? Math.min(1, availableGameHeight / gameContentHeight) : 1;
   const responsiveScale = Math.min(1, Math.max(0.78, (screenWidth - 24) / 360));
   const router = useRouter();
   const { type } = useLocalSearchParams<{ type: string }>();
@@ -1349,7 +1352,19 @@ const cardStyle3 = useAnimatedStyle(() => ({
         </SafeAreaView>
       </LinearGradient>
 
-      <ScrollView style={{ flex: 1, width: '100%', backgroundColor: '#070914' }} contentContainerStyle={{ paddingHorizontal: 10, paddingTop: 10, paddingBottom: 28, alignItems: 'stretch', width: '100%' }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+      <View style={{ flex: 1, width: '100%', backgroundColor: '#070914', alignItems: 'center', justifyContent: 'flex-start', overflow: 'hidden' }}>
+        <View style={{
+          width: '100%', alignItems: 'center', overflow: 'visible',
+          transform: [{ scale: fitScale }],
+          height: gameContentHeight > 0 ? gameContentHeight * fitScale : undefined,
+        }}>
+        <View
+          onLayout={(event) => {
+            const measured = event.nativeEvent.layout.height;
+            if (measured > 0 && Math.abs(measured - gameContentHeight) > 2) setGameContentHeight(measured);
+          }}
+          style={{ width: '100%', paddingHorizontal: 10, paddingTop: 6, paddingBottom: 10 }}
+        >
         {/* Live wins feed: keep the container neutral; RGB styling belongs on each name chip inside LiveBetFeed. */}
         <View style={{ marginBottom: 10, borderRadius: 13, overflow: 'hidden', backgroundColor: '#090B1B' }}>
           <LiveBetFeed game={gt} />
@@ -1413,7 +1428,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
                       {gt === 'aviator' ? (
                       <Image source={require('../../assets/images/plane.png')} style={{ width: 90, height: 90, resizeMode: 'contain' }} />
                     ) : gt === 'crash' ? (
-                      <Image source={require('../../assets/images/rocket.png')} style={{ width: 90, height: 90, resizeMode: 'contain' }} />
+                      <Image source={require('../../assets/images/rocket.png')} style={{ width: 100, height: 100, resizeMode: 'contain' }} />
                     ) : (
                       <Ionicons name={meta.icon} size={72} color="#fff" />
                     )}
@@ -2837,7 +2852,9 @@ const cardStyle3 = useAnimatedStyle(() => ({
             />
           )}
         </View>
-      </ScrollView>
+        </View>
+        </View>
+      </View>
     </KeyboardAvoidingView>
   );
 }
