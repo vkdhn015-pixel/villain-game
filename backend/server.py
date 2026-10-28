@@ -1817,7 +1817,7 @@ from urllib.request import Request as _UrlRequest, urlopen as _urlopen
 from urllib.error import HTTPError as _HTTPError, URLError as _URLError
 
 CRICKET_API_KEY = os.environ.get("CRICKET_API_KEY", "").strip()
-CRICKET_API_BASE = os.environ.get("CRICKET_API_BASE", "https://cricket.sportmonks.com/api/v2.0").rstrip("/")
+CRICKET_API_BASE = os.environ.get("CRICKET_API_BASE", "https://cricketliveapi.com/api/v1").rstrip("/")
 FANTASY_STARTING_COINS = 0  # Fantasy uses the existing main wallet; no separate starter balance.
 
 class FantasyTeamCreateIn(BaseModel):
@@ -1832,70 +1832,151 @@ class FantasyJoinContestIn(BaseModel):
 
 
 def _sportmonks_request_sync(path: str, params: Optional[dict] = None) -> dict:
+    """Call CricketLiveAPI using its documented Bearer-token authentication."""
     if not CRICKET_API_KEY:
-        raise HTTPException(503, "Cricket API key is not configured. Add CRICKET_API_KEY to backend environment.")
-    query = dict(params or {})
-    query["api_token"] = CRICKET_API_KEY
-    url = f"{CRICKET_API_BASE}/{path.lstrip('/')}?{_urlencode(query, doseq=True)}"
-    request = _UrlRequest(url, headers={"Accept": "application/json", "User-Agent": "Villain11-Fantasy/1.0"})
+        raise HTTPException(503, "Cricket API key is not configured. Add CRICKET_API_KEY to backend .env.")
+    query = _urlencode(params or {}, doseq=True)
+    url = f"{CRICKET_API_BASE}/{path.lstrip('/')}"
+    if query:
+        url = f"{url}?{query}"
+    request = _UrlRequest(url, headers={
+        "Authorization": f"Bearer {CRICKET_API_KEY}",
+        "Accept": "application/json",
+        "User-Agent": "Villain11-Fantasy/1.0",
+    })
     try:
         with _urlopen(request, timeout=15) as response:
-            return _json.loads(response.read().decode("utf-8"))
+            body = _json.loads(response.read().decode("utf-8"))
+        if isinstance(body, dict) and str(body.get("status", "success")).lower() == "error":
+            message = str(body.get("message") or "Cricket data provider returned an error.")
+            if "match not found" in message.lower():
+                raise HTTPException(404, message)
+            logger.warning("CricketLiveAPI error for %s: %s", path, message)
+            raise HTTPException(502, message)
+        return body
     except _HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = ""
         if exc.code in (401, 403):
-            raise HTTPException(502, "Cricket data provider rejected the API key or plan access.")
+            raise HTTPException(502, "CricketLiveAPI rejected the API token or this plan does not include the endpoint.")
         if exc.code == 429:
-            raise HTTPException(503, "Cricket data provider rate limit reached. Try again shortly.")
+            raise HTTPException(503, "CricketLiveAPI quota/rate limit reached. Try again shortly.")
         if exc.code == 404:
-            raise HTTPException(404, "Match not found at cricket data provider.")
-        logger.warning("Sportmonks HTTP error %s for %s", exc.code, path)
-        raise HTTPException(502, "Cricket data provider request failed.")
+            logger.warning("CricketLiveAPI 404 for %s: %s", path, detail[:300])
+            raise HTTPException(404, "Cricket data not published for this endpoint or match yet.")
+        logger.warning("CricketLiveAPI HTTP error %s for %s: %s", exc.code, path, detail[:300])
+        raise HTTPException(502, "CricketLiveAPI request failed.")
+    except HTTPException:
+        raise
     except (TimeoutError, _URLError) as exc:
-        logger.warning("Sportmonks connection error: %s", exc)
-        raise HTTPException(502, "Could not connect to cricket data provider.")
+        logger.warning("CricketLiveAPI connection error: %s", exc)
+        raise HTTPException(502, "Could not connect to CricketLiveAPI.")
     except Exception as exc:
-        logger.warning("Sportmonks response error: %s", exc)
-        raise HTTPException(502, "Invalid response from cricket data provider.")
+        logger.warning("CricketLiveAPI response error: %s", exc)
+        raise HTTPException(502, "Invalid response from CricketLiveAPI.")
 
 async def _sportmonks_get(path: str, params: Optional[dict] = None) -> dict:
     return await asyncio.to_thread(_sportmonks_request_sync, path, params)
 
 def _sm_data(response: dict):
-    return response.get("data", []) if isinstance(response, dict) else []
+    """Unwrap CricketLiveAPI's {status, data: ...} response envelope."""
+    if not isinstance(response, dict):
+        return []
+    data = response.get("data", response)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("matches", "players", "playing_xi", "points"):
+            if isinstance(data.get(key), list):
+                return data[key]
+        # Some detail endpoints return a single object in data.
+        if data.get("match_id") is not None or data.get("id") is not None:
+            return data
+    return []
 
 def _sm_team_name(team: Any, fallback: str = "TBD") -> str:
     if isinstance(team, dict):
         return str(team.get("name") or team.get("fullname") or team.get("code") or fallback)
+    if isinstance(team, str) and team.strip():
+        return team.strip()
     return fallback
 
 def _normalize_fantasy_match(match: dict) -> dict:
+    # CricketLiveAPI returns compact fields such as match_id, teams, format, score.
+    teams = str(match.get("teams") or match.get("name") or "").split(" vs ", 1)
     local = match.get("localteam") or match.get("local_team") or {}
     visitor = match.get("visitorteam") or match.get("visitor_team") or {}
-    boards = match.get("scoreboards") or []
-    scores = []
-    for board in boards if isinstance(boards, list) else []:
-        if isinstance(board, dict) and (board.get("type") == "total" or board.get("total") is not None):
-            scores.append({"team_id": board.get("team_id"), "score": board.get("total", board.get("score")),
-                           "wickets": board.get("wickets"), "overs": board.get("overs"),
-                           "inning": board.get("scoreboard") or board.get("inning")})
-    raw_status = match.get("status")
+    team_a_name = _sm_team_name(local, teams[0] if teams else "Team A")
+    team_b_name = _sm_team_name(visitor, teams[1] if len(teams) > 1 else "Team B")
+    raw_status = match.get("status") or match.get("match_status") or "Scheduled"
     if isinstance(raw_status, dict):
-        status_text = str(raw_status.get("name") or raw_status.get("short") or raw_status.get("description") or "")
-    else:
-        status_text = str(raw_status or "")
-    if not status_text:
-        status_text = "Live" if match.get("live") else "Scheduled"
+        raw_status = raw_status.get("name") or raw_status.get("short") or raw_status.get("description") or "Scheduled"
+    status_text = str(raw_status)
+    mid = match.get("match_id") or match.get("id")
+    live = bool(match.get("live")) or any(x in status_text.lower() for x in ("live", "innings", "in play"))
+    scores = []
+    if match.get("score"):
+        scores.append({"score": match.get("score"), "overs": match.get("overs"), "wickets": match.get("wickets")})
     return {
-        "id": str(match.get("id")), "provider_id": match.get("id"),
+        "id": str(mid) if mid is not None else "", "provider_id": mid,
         "league_id": match.get("league_id"), "season_id": match.get("season_id"),
-        "name": match.get("round") or match.get("name") or match.get("type") or "Cricket Match",
-        "format": match.get("type") or "Cricket", "status": status_text,
-        "live": bool(match.get("live")), "starting_at": match.get("starting_at"),
-        "venue": (match.get("venue") or {}).get("name") if isinstance(match.get("venue"), dict) else None,
-        "team_a": {"id": match.get("localteam_id") or local.get("id"), "name": _sm_team_name(local, "Team A"), "code": local.get("code"), "logo": local.get("image_path")},
-        "team_b": {"id": match.get("visitorteam_id") or visitor.get("id"), "name": _sm_team_name(visitor, "Team B"), "code": visitor.get("code"), "logo": visitor.get("image_path")},
-        "scores": scores, "note": match.get("note"),
+        "name": match.get("name") or match.get("teams") or f"{team_a_name} vs {team_b_name}",
+        "format": match.get("format") or match.get("type") or "Cricket",
+        "status": status_text, "live": live,
+        "starting_at": match.get("starting_at") or match.get("start_time") or match.get("date"),
+        "venue": match.get("venue"),
+        "team_a": {"id": match.get("team1_id") or (local.get("id") if isinstance(local, dict) else None), "name": team_a_name, "code": match.get("team1_code") or (local.get("code") if isinstance(local, dict) else None), "logo": local.get("image_path") if isinstance(local, dict) else None},
+        "team_b": {"id": match.get("team2_id") or (visitor.get("id") if isinstance(visitor, dict) else None), "name": team_b_name, "code": match.get("team2_code") or (visitor.get("code") if isinstance(visitor, dict) else None), "logo": visitor.get("image_path") if isinstance(visitor, dict) else None},
+        "scores": scores, "score": match.get("score"), "note": match.get("note"),
     }
+
+def _normalize_fantasy_player(player: dict) -> dict:
+    pid = player.get("player_id") or player.get("id")
+    name = player.get("name") or player.get("fullname") or " ".join(str(player.get(k) or "") for k in ("firstname", "lastname")).strip()
+    role = str(player.get("role") or player.get("position") or "BAT").upper()
+    if role not in {"WK", "BAT", "AR", "BOWL"}:
+        role_text = role.lower().replace("-", " ")
+        role = "WK" if "keeper" in role_text or "wicket" in role_text else "AR" if "all round" in role_text or "allround" in role_text else "BOWL" if "bowl" in role_text else "BAT"
+    team = player.get("team")
+    team_id = player.get("team_id")
+    if team_id is None and isinstance(team, dict):
+        team_id = team.get("id")
+    return {"id": str(pid), "name": name or f"Player {pid}", "role": role, "team_id": team_id if team_id is not None else team,
+            "credits": float(player.get("credits", {"WK": 8.5, "BAT": 9.0, "AR": 9.5, "BOWL": 8.5}[role]) or 0),
+            "photo": player.get("image_path") or player.get("image_url") or player.get("photo"),
+            "captain": bool(player.get("captain")), "wicketkeeper": role == "WK",
+            "points": float(player.get("fantasy_points", player.get("points", 0)) or 0),
+            "is_playing": player.get("is_playing", player.get("playing", None))}
+
+async def _get_fantasy_fixture_players(match_id: str) -> tuple[dict, list]:
+    # Match IDs must originate from /fantasy/matches; do not query Sportmonks fixtures.
+    matches_resp = await _sportmonks_get("fantasy/matches")
+    matches_data = _sm_data(matches_resp)
+    if isinstance(matches_data, dict):
+        matches_data = [matches_data]
+    found = next((m for m in matches_data if isinstance(m, dict) and str(m.get("match_id") or m.get("id")) == str(match_id)), None)
+    if not found:
+        raise HTTPException(404, "Match ID was not found in CricketLiveAPI fantasy matches. Refresh the match list and select a listed match.")
+    player_resp = await _sportmonks_get(f"fantasy/players/{_urlencode({'id': str(match_id)})[3:]}")
+    players_data = _sm_data(player_resp)
+    if isinstance(players_data, dict):
+        players_data = players_data.get("players", []) if isinstance(players_data.get("players"), list) else []
+    players = [_normalize_fantasy_player(p) for p in players_data if isinstance(p, dict) and (p.get("player_id") is not None or p.get("id") is not None)]
+    # Prefer the confirmed XI endpoint when available, but keep the full fantasy squad if not published.
+    try:
+        xi_resp = await _sportmonks_get(f"fantasy/playing-xi/{match_id}")
+        xi_data = _sm_data(xi_resp)
+        if isinstance(xi_data, dict):
+            xi_data = xi_data.get("players", []) if isinstance(xi_data.get("players"), list) else []
+        xi_ids = {str(p.get("player_id") or p.get("id")) for p in xi_data if isinstance(p, dict)}
+        if xi_ids:
+            for p in players:
+                p["is_playing"] = p["id"] in xi_ids
+    except HTTPException as exc:
+        logger.info("Playing XI not available yet for match %s: %s", match_id, exc.detail)
+    return found, players
 
 async def _fantasy_wallet(user_id: str) -> dict:
     """Fantasy balance is the user's existing main wallet balance, not a separate wallet."""
@@ -1918,27 +1999,6 @@ def _fantasy_player_role(player: dict) -> str:
     if "bowl" in label: return "BOWL"
     return "BAT"
 
-def _normalize_fantasy_player(player: dict) -> dict:
-    pid = player.get("player_id") or player.get("id")
-    name = player.get("fullname") or player.get("name")
-    if not name: name = " ".join(str(player.get(k) or "") for k in ("firstname", "lastname")).strip()
-    role = _fantasy_player_role(player)
-    credits = {"WK": 8.5, "BAT": 9.0, "AR": 9.5, "BOWL": 8.5}[role]
-    team_id = player.get("team_id")
-    if team_id is None and isinstance(player.get("team"), dict): team_id = player["team"].get("id")
-    lineup_meta = player.get("lineup") if isinstance(player.get("lineup"), dict) else {}
-    return {"id": str(pid), "name": name or f"Player {pid}", "role": role, "team_id": team_id,
-            "credits": credits, "photo": player.get("image_path") or player.get("image_url"),
-            "captain": bool(lineup_meta.get("captain")), "wicketkeeper": bool(lineup_meta.get("wicketkeeper"))}
-
-async def _get_fantasy_fixture_players(match_id: str) -> tuple[dict, list]:
-    response = await _sportmonks_get(f"fixtures/{match_id}", {"include": "localteam,visitorteam,lineup,scoreboards,runs,batting,bowling,venue"})
-    fixture = _sm_data(response)
-    if not isinstance(fixture, dict): raise HTTPException(404, "Match not found")
-    lineup = fixture.get("lineup") or []
-    players = [_normalize_fantasy_player(p) for p in lineup if isinstance(p, dict) and (p.get("id") is not None or p.get("player_id") is not None)] if isinstance(lineup, list) else []
-    return fixture, players
-
 @api.get("/fantasy/wallet")
 async def fantasy_wallet(user=Depends(get_current_user)):
     wallet = await _fantasy_wallet(user["id"])
@@ -1951,35 +2011,39 @@ async def fantasy_transactions(user=Depends(get_current_user), limit: int = 50):
 
 @api.get("/fantasy/matches")
 async def fantasy_matches(status: str = "all", days: int = 7, user=Depends(get_current_user)):
-    # Return real fixtures/livescores; status may be all, live, upcoming, completed.
+    """Return only matches published by CricketLiveAPI's fantasy endpoint."""
     status = status.lower()
     if status not in {"all", "live", "upcoming", "completed"}:
         raise HTTPException(400, "status must be all, live, upcoming, or completed")
     days = max(1, min(days, 14))
-    matches = []
-    if status in {"all", "live"}:
-        resp = await _sportmonks_get("livescores", {"include": "localteam,visitorteam,scoreboards,venue"})
-        matches.extend([_normalize_fantasy_match(m) for m in _sm_data(resp) if isinstance(m, dict)])
-    if status in {"all", "upcoming", "completed"}:
-        today = datetime.now(timezone.utc).date()
-        start = today - timedelta(days=days) if status == "completed" else today
-        end = today if status == "completed" else today + timedelta(days=days)
-        resp = await _sportmonks_get("fixtures", {"filter[starts_between]": f"{start.isoformat()},{end.isoformat()}",
-            "include": "localteam,visitorteam,scoreboards,venue", "page": 1})
-        for item in _sm_data(resp):
-            if not isinstance(item, dict): continue
-            m = _normalize_fantasy_match(item)
-            st = str(m.get("status") or "").lower()
-            live = m["live"] or any(x in st for x in ("innings", "live", "in play"))
-            done = any(x in st for x in ("finished", "complete", "result", "abandoned"))
-            if status == "upcoming" and (live or done): continue
-            if status == "completed" and not done: continue
-            matches.append(m)
-    unique = {m["id"]: m for m in matches}
-    values = list(unique.values())
-    values.sort(key=lambda m: (not m.get("live", False), str(m.get("starting_at") or "")))
-    values = values[:100]
-    return {"provider": "sportmonks", "matches": values, "count": len(values)}
+    resp = await _sportmonks_get("fantasy/matches")
+    raw = _sm_data(resp)
+    if isinstance(raw, dict):
+        raw = raw.get("matches", []) if isinstance(raw.get("matches"), list) else [raw]
+    matches = [_normalize_fantasy_match(m) for m in raw if isinstance(m, dict)]
+    now = datetime.now(timezone.utc)
+    filtered = []
+    for m in matches:
+        st = str(m.get("status") or "").lower()
+        live = bool(m.get("live"))
+        done = _status_is_finished(st)
+        if status == "live" and not live: continue
+        if status == "upcoming" and (live or done): continue
+        if status == "completed" and not done: continue
+        # Filter date windows only when provider supplied a parseable date.
+        raw_date = m.get("starting_at")
+        if raw_date:
+            try:
+                dt = datetime.fromisoformat(str(raw_date).replace("Z", "+00:00"))
+                if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+                if status == "completed" and dt < now - timedelta(days=days): continue
+                if status != "completed" and dt > now + timedelta(days=days): continue
+            except (ValueError, TypeError):
+                pass
+        if m.get("id"):
+            filtered.append(m)
+    filtered.sort(key=lambda m: (not m.get("live", False), str(m.get("starting_at") or "")))
+    return {"provider": "cricketliveapi", "matches": filtered[:100], "count": min(len(filtered), 100)}
 
 @api.get("/fantasy/matches/{match_id}")
 async def fantasy_match_detail(match_id: str, user=Depends(get_current_user)):
@@ -2104,51 +2168,37 @@ def _status_is_finished(status: Any) -> bool:
 
 
 async def _fantasy_points_for_match(match_id: str) -> tuple[dict, dict]:
-    """Calculate fantasy points from the latest provider fixture data."""
-    fixture, lineup = await _get_fantasy_fixture_players(match_id)
-    points = {str(p["id"]): 0.0 for p in lineup}
-    names = {str(p["id"]): p.get("name", "Player") for p in lineup}
-    batting_rows = _as_list(fixture.get("batting")) or _as_list(fixture.get("runs"))
-    bowling_rows = _as_list(fixture.get("bowling"))
-
-    for row in batting_rows:
-        if not isinstance(row, dict):
-            continue
-        pid = _provider_player_id(row)
-        if not pid:
-            continue
-        runs = float(row.get("score", row.get("runs", row.get("total", 0))) or 0)
-        fours = float(row.get("four_x", row.get("fours", row.get("four", 0))) or 0)
-        sixes = float(row.get("six_x", row.get("sixes", row.get("six", 0))) or 0)
-        balls = float(row.get("ball", row.get("balls", row.get("ball_faced", 0))) or 0)
-        out_value = row.get("out") or row.get("dismissal") or row.get("wicket")
-        points[pid] = points.get(pid, 0.0) + runs + fours + (2 * sixes)
-        points[pid] += 16 if runs >= 100 else 8 if runs >= 50 else 4 if runs >= 30 else 0
-        if runs == 0 and balls > 0 and out_value:
-            points[pid] -= 2
-        player = row.get("player")
-        if isinstance(player, dict):
-            names[pid] = player.get("fullname") or player.get("name") or names.get(pid, "Player")
-
-    for row in bowling_rows:
-        if not isinstance(row, dict):
-            continue
-        pid = _provider_player_id(row)
-        if not pid:
-            continue
-        wickets = float(row.get("wickets", row.get("wicket", row.get("total_wickets", 0))) or 0)
-        maidens = float(row.get("maidens", row.get("medians", row.get("maiden_overs", 0))) or 0)
-        points[pid] = points.get(pid, 0.0) + (25 * wickets) + (12 * maidens)
-        points[pid] += 16 if wickets >= 5 else 8 if wickets >= 4 else 4 if wickets >= 3 else 0
-        player = row.get("player")
-        if isinstance(player, dict):
-            names[pid] = player.get("fullname") or player.get("name") or names.get(pid, "Player")
-
-    return fixture, {
-        pid: {"points": round(value, 2), "name": names.get(pid, "Player")}
-        for pid, value in points.items()
-    }
-
+    """Use the provider's fantasy points; do not infer points from scorecard fields."""
+    fixture, squad = await _get_fantasy_fixture_players(match_id)
+    points_rows = []
+    last_error = None
+    for endpoint in (f"fantasy/player-points/{match_id}", f"fantasy/live-score/{match_id}"):
+        try:
+            response = await _sportmonks_get(endpoint)
+            rows = _sm_data(response)
+            if isinstance(rows, dict):
+                rows = rows.get("players", []) if isinstance(rows.get("players"), list) else []
+            if isinstance(rows, list) and rows:
+                points_rows = rows
+                break
+        except HTTPException as exc:
+            last_error = exc
+    if not points_rows and last_error:
+        # Before the match starts the provider may not publish points yet; zero is valid then.
+        logger.info("Fantasy points not published yet for %s: %s", match_id, last_error.detail)
+    point_map = {str(p["id"]): {"points": float(p.get("points", 0) or 0), "name": p.get("name", "Player")} for p in squad}
+    for row in points_rows:
+        if not isinstance(row, dict): continue
+        pid = str(row.get("player_id") or row.get("id") or "")
+        if not pid: continue
+        name = row.get("name") or row.get("fullname") or point_map.get(pid, {}).get("name", "Player")
+        pts = row.get("fantasy_points", row.get("points", row.get("total_points", 0)))
+        point_map[pid] = {"points": float(pts or 0), "name": str(name)}
+    # Normalize provider status to the shape used by contest settlement.
+    if isinstance(fixture, dict):
+        fixture = dict(fixture)
+        fixture["status"] = fixture.get("status") or fixture.get("match_status") or "Scheduled"
+    return fixture, point_map
 
 async def _build_fantasy_leaderboard(contest: dict) -> tuple[dict, list]:
     fixture, points = await _fantasy_points_for_match(str(contest["match_id"]))

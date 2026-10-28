@@ -9,7 +9,7 @@ import { colors, spacing, radius, shadows } from '@/src/theme';
 import { PrimaryButton, inputStyle } from '@/src/ui';
 import { api } from '@/src/api';
 
-const QUICK = [500, 1000, 2000, 5000, 10000];
+const QUICK = [100, 200, 500, 1000, 2000, 5000, 10000];
 
 export default function Deposit() {
   const router = useRouter();

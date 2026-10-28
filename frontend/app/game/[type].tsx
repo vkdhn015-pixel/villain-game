@@ -112,7 +112,7 @@ export default function GameScreen() {
 
   const [balance, setBalance] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [stageSize, setStageSize] = useState({ width: 490, height: 428 });
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [display, setDisplay] = useState<string>('READY');
@@ -272,39 +272,98 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
 
   useEffect(() => {
     if (!isCrash) return;
-    livePollTimer.current = setInterval(async () => {
+
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let previousStatus: string | null = null;
+    let previousRoundId: string | null = null;
+
+    // Poll sequentially: never allow slow requests to overlap and return stale states.
+    const pollLiveState = async () => {
       try {
         const st = await api.liveState();
-        if (st.round_id && st.round_id !== lastRoundIdRef.current) {
+        if (!active) return;
+
+        const roundChanged = !!st.round_id && st.round_id !== previousRoundId;
+        const statusChanged = st.status !== previousStatus;
+
+        if (roundChanged) {
+          previousRoundId = st.round_id;
           lastRoundIdRef.current = st.round_id;
+          setLiveRoundId(st.round_id);
           setMyLiveBetPlaced(false);
-          if (st.status === 'waiting') setWaitingSeconds(5);
+        } else if (st.round_id) {
+          setLiveRoundId(st.round_id);
         }
-        setLiveRoundId(st.round_id || null);
+
         if (st.status === 'waiting') {
-          setLiveStatus('waiting');
-          setDisplay('READY');
-          setFlying(false);
-          fly.value = 0;
-          cancelAnimation(crashExitX);
-          cancelAnimation(crashExitY);
-          crashExitX.value = 0;
-          crashExitY.value = 0;
-          crashExitRoundRef.current = null;
-          setResult(null);
+          // Reset visuals only at the transition/new round, not on every poll.
+          if (statusChanged || roundChanged) {
+            setLiveStatus('waiting');
+            setDisplay('READY');
+            setFlying(false);
+            cancelAnimation(fly);
+            fly.value = 0;
+            cancelAnimation(crashExitX);
+            cancelAnimation(crashExitY);
+            crashExitX.value = 0;
+            crashExitY.value = 0;
+            crashExitRoundRef.current = null;
+            cancelAnimation(glowIntensity);
+            glowIntensity.value = 0;
+            cancelAnimation(bgShift);
+            bgShift.value = 0;
+            setResult(null);
+          }
+          if (typeof st.time_left === 'number') {
+            setWaitingSeconds(Math.max(0, Math.ceil(st.time_left)));
+          }
         } else if (st.status === 'flying') {
-          setLiveStatus('flying');
-          setFlying(true);
-          setDisplay('FLYING');
-          setLiveMult(st.multiplier.toFixed(2));
-          fly.value = Math.min(1, (st.multiplier - 1) / 10);
-          glowIntensity.value = withRepeat(withSequence(withTiming(0.9, { duration: 500 }), withTiming(0.3, { duration: 500 })), -1, true);
+          if (statusChanged || roundChanged) {
+            setLiveStatus('flying');
+            setFlying(true);
+            setDisplay('FLYING');
+            cancelAnimation(glowIntensity);
+            glowIntensity.value = withRepeat(
+              withSequence(
+                withTiming(0.9, { duration: 500 }),
+                withTiming(0.3, { duration: 500 })
+              ),
+              -1,
+              true
+            );
+            cancelAnimation(bgShift);
+            bgShift.value = withRepeat(
+              withTiming(1, { duration: 900, easing: Easing.linear }),
+              -1,
+              false
+            );
+          }
+
+          const multiplier = Number(st.multiplier);
+          if (Number.isFinite(multiplier)) {
+            setLiveMult(multiplier.toFixed(2));
+            // Smoothly interpolate between server snapshots instead of snapping every poll.
+            const targetProgress = Math.max(0, Math.min(1, (multiplier - 1) / 10));
+            cancelAnimation(fly);
+            fly.value = withTiming(targetProgress, {
+              duration: 240,
+              easing: Easing.linear,
+            });
+          }
         } else if (st.status === 'crashed') {
-          if (liveStatus !== 'crashed') {
-            shake.value = withSequence(withTiming(-10, { duration: 60 }), withTiming(10, { duration: 60 }), withTiming(0, { duration: 60 }));
-            glowIntensity.value = withTiming(0, { duration: 300 });
-            try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error); } catch {}
-            // Play once for each round transition, not on every 300ms poll.
+          if (statusChanged || roundChanged) {
+            setLiveStatus('crashed');
+            setFlying(false);
+            setDisplay(`CRASHED @ ${Number(st.crash_point ?? 1).toFixed(2)}x`);
+            cancelAnimation(glowIntensity);
+            glowIntensity.value = withTiming(0, { duration: 180 });
+            cancelAnimation(bgShift);
+            bgShift.value = withTiming(0, { duration: 180 });
+            try {
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+            } catch {}
+
             if (st.round_id && lastCrashSoundRoundRef.current !== st.round_id) {
               lastCrashSoundRoundRef.current = st.round_id;
               const sound = crashSoundRef.current;
@@ -314,44 +373,52 @@ const dtTigerAnimatedStyle = useAnimatedStyle(() => ({
                   .catch((error) => console.warn('Crash sound playback failed:', error));
               }
             }
-          }
-          if (
-            gt === 'aviator' &&
-            st.round_id &&
-            crashExitRoundRef.current !== st.round_id
-          ) {
-            // Run the crash exit animation only once for this round.
-            crashExitRoundRef.current = st.round_id;
-            cancelAnimation(crashExitX);
-            cancelAnimation(crashExitY);
-            crashExitX.value = 0;
-            crashExitY.value = 0;
-            crashExitX.value = withTiming(900, {
-              duration: 550,
-              easing: Easing.in(Easing.quad),
-            });
-            crashExitY.value = withTiming(-520, {
-              duration: 550,
-              easing: Easing.in(Easing.quad),
-            });
-          }
-          setLiveStatus('crashed');
-          setFlying(false);
-          setDisplay(`CRASHED @ ${st.crash_point?.toFixed(2)}x`);
-        }
-      } catch {}
-    }, 300);
-    return () => { if (livePollTimer.current) clearInterval(livePollTimer.current); };
-  }, [isCrash, liveStatus]);
 
-  // Centre waiting timer: counts down once per second and disappears as soon as a round starts.
-  useEffect(() => {
-    if (!isCrash || liveStatus !== 'waiting') return;
-    const timerId = setInterval(() => {
-      setWaitingSeconds((current) => Math.max(0, current - 1));
-    }, 1000);
-    return () => clearInterval(timerId);
-  }, [isCrash, liveStatus, liveRoundId]);
+            if (
+              gt === 'aviator' &&
+              st.round_id &&
+              crashExitRoundRef.current !== st.round_id
+            ) {
+              crashExitRoundRef.current = st.round_id;
+              cancelAnimation(crashExitX);
+              cancelAnimation(crashExitY);
+              crashExitX.value = 0;
+              crashExitY.value = 0;
+              crashExitX.value = withTiming(900, {
+                duration: 550,
+                easing: Easing.in(Easing.quad),
+              });
+              crashExitY.value = withTiming(-520, {
+                duration: 550,
+                easing: Easing.in(Easing.quad),
+              });
+            }
+          }
+        }
+
+        previousStatus = st.status;
+      } catch (error) {
+        // Keep polling after transient network failures; don't mutate animation state.
+        console.warn('Live crash state poll failed:', error);
+      } finally {
+        if (active) timer = setTimeout(pollLiveState, 250);
+      }
+    };
+
+    pollLiveState();
+
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+      if (livePollTimer.current) clearInterval(livePollTimer.current);
+      cancelAnimation(fly);
+      cancelAnimation(glowIntensity);
+      cancelAnimation(bgShift);
+    };
+  }, [isCrash, gt]);
+
+  // Waiting countdown is driven only by the sequential live-state poll's server time_left.
+  // A second local interval here competed with server updates and caused timer jumps/flicker.
 
   const clearTimers = useCallback(() => {
     [multTimer, revealTimer, cdTimer, climbTimer, pollTimer].forEach((t) => { if (t.current) { clearInterval(t.current); clearTimeout(t.current); t.current = null; } });
@@ -759,7 +826,7 @@ const runAnimationFor = (res: any) => {
     withTiming(0.94, { duration: 90 }),
     withTiming(1, { duration: 90 })
   );
-  plinkoOpacity.value = withDelay(1900, withTiming(0, { duration: 120 }));
+  plinkoOpacity.value = withDelay(1500, withTiming(0, { duration: 250 }));
 
   cdTimer.current = setTimeout(() => {
     try {
@@ -2496,7 +2563,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
       {Array.from({ length: 14 }).map((_, row) => {
         // 14 rows: two top-side pegs anchor the sloping triangle edges; each row below adds one peg.
-        const pegCount = row + 2;
+        const pegCount = row === 13 ? row + 4 : row + 2;
 
         return (
           <View
@@ -2504,10 +2571,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
             style={[
               styles.plinkoPegRow,
               {
-                width: Math.min(
-                  340,
-                  34 + pegCount * 22
-                ),
+                width: `${(pegCount / 17) * 94}%`,
               },
             ]}
           >
