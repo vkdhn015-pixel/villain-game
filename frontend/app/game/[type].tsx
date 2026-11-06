@@ -88,7 +88,7 @@ function Particle({ index, color }: { index: number; color: string }) {
 
 export default function GameScreen() {
   const { width: screenWidth } = useWindowDimensions();
-  const responsiveScale = Math.min(1, Math.max(0.78, (screenWidth - 24) / 360));
+  const responsiveScale = Math.min(1, Math.max(0.9, (screenWidth - 20) / 360));
   const router = useRouter();
   const { type } = useLocalSearchParams<{ type: string }>();
   const gt = String(type || 'crash');
@@ -1349,14 +1349,26 @@ const cardStyle3 = useAnimatedStyle(() => ({
         </SafeAreaView>
       </LinearGradient>
 
-      <ScrollView style={{ flex: 1, width: '100%', backgroundColor: '#070914' }} contentContainerStyle={{ width: '100%', paddingHorizontal: 10, paddingTop: 6, paddingBottom: 10 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-        <View style={{ width: '100%', alignItems: 'center' }}>
+      <ScrollView
+        style={{ flex: 1, width: '100%', backgroundColor: '#070914' }}
+        contentContainerStyle={{
+          width: '100%',
+          flexGrow: 1,
+          paddingHorizontal: 10,
+          paddingTop: 4,
+          paddingBottom: 8,
+          alignItems: 'stretch',
+        }}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={{ width: '100%', alignItems: 'stretch', flexGrow: 1 }}>
         {/* Live wins feed: keep the container neutral; RGB styling belongs on each name chip inside LiveBetFeed. */}
-        <View style={{ marginBottom: 10, borderRadius: 13, overflow: 'hidden', backgroundColor: '#090B1B' }}>
+        <View style={{ width: '100%', marginBottom: 8, borderRadius: 13, overflow: 'hidden', backgroundColor: '#090B1B' }}>
           <LiveBetFeed game={gt} />
         </View>
         {/* Game stage */}
-        <View style={[styles.stage, { width: '100%', alignSelf: 'center' }]}>
+        <View style={[styles.stage, { width: '100%', alignSelf: 'stretch' }]}>
           <LinearGradient 
           colors={['#080D22', '#11112B', '#071D2B']} 
            style={[
@@ -2967,12 +2979,15 @@ aviatorWaitingSub: {
   zIndex: 0,
 },
 crashAviatorStage: {
-  minHeight: 270,
+  // Match the reference layout: wide game canvas with a controlled portrait height.
+  // At ~340dp content width this gives ~300dp height, avoiding an oversized canvas.
+  aspectRatio: 1.12,
+  minHeight: 0,
 },
   
   tpTable: {
   width: '100%',
-  minHeight: 320,
+  minHeight: 300,
   borderRadius: 20,
   backgroundColor: '#07552F',
   borderWidth: 2,
