@@ -1355,7 +1355,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
       <View style={{ flex: 1, width: '100%', backgroundColor: '#070914', alignItems: 'center', justifyContent: 'flex-start', overflow: 'hidden' }}>
         <View style={{
           width: '100%', alignItems: 'center', overflow: 'visible',
-          transform: [{ scale: fitScale }],
+          transform: [{ scaleX: 1 }, { scaleY: fitScale }],
           height: gameContentHeight > 0 ? gameContentHeight * fitScale : undefined,
         }}>
         <View
