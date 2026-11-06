@@ -63,12 +63,12 @@ const cardStyles = StyleSheet.create({
 
 const btnStyles = StyleSheet.create({
   btn: {
-    paddingVertical: 14,
+    paddingVertical: 10,
     paddingHorizontal: spacing.xl,
     borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 52,
+    minHeight: 30,
   },
   label: { color: '#fff', fontSize: 16, fontWeight: '800', letterSpacing: 0.3 } as TextStyle,
 });
@@ -83,7 +83,7 @@ const ghostStyles = StyleSheet.create({
     borderColor: colors.brandPrimary,
     backgroundColor: '#FFF5F4',
   },
-  label: { color: colors.brandPrimary, fontSize: 15, fontWeight: '700' },
+  label: { color: colors.brandPrimary, fontSize: 12, fontWeight: '700' },
 });
 
 const chipStyles = StyleSheet.create({
@@ -114,7 +114,7 @@ export const inputStyle = StyleSheet.create({
     borderRadius: radius.md,
     backgroundColor: colors.surfaceSecondary,
     paddingHorizontal: spacing.md,
-    fontSize: 16,
+    fontSize: 14,
     color: colors.onSurface,
     borderWidth: 1,
     borderColor: colors.border,

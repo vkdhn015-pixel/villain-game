@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, KeyboardAvoidingView, Platform, AccessibilityInfo, useWindowDimensions } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, TextInput, KeyboardAvoidingView, Platform, AccessibilityInfo } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -87,8 +87,6 @@ function Particle({ index, color }: { index: number; color: string }) {
 }
 
 export default function GameScreen() {
-  const { width: screenWidth } = useWindowDimensions();
-  const responsiveScale = Math.min(1, Math.max(0.9, (screenWidth - 20) / 360));
   const router = useRouter();
   const { type } = useLocalSearchParams<{ type: string }>();
   const gt = String(type || 'crash');
@@ -1349,26 +1347,13 @@ const cardStyle3 = useAnimatedStyle(() => ({
         </SafeAreaView>
       </LinearGradient>
 
-      <ScrollView
-        style={{ flex: 1, width: '100%', backgroundColor: '#070914' }}
-        contentContainerStyle={{
-          width: '100%',
-          flexGrow: 1,
-          paddingHorizontal: 10,
-          paddingTop: 4,
-          paddingBottom: 8,
-          alignItems: 'stretch',
-        }}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-      >
-        <View style={{ width: '100%', alignItems: 'stretch', flexGrow: 1 }}>
+      <ScrollView style={{ backgroundColor: '#070914' }} contentContainerStyle={{ padding: spacing.lg, paddingBottom: 36 }} keyboardShouldPersistTaps="handled">
         {/* Live wins feed: keep the container neutral; RGB styling belongs on each name chip inside LiveBetFeed. */}
-        <View style={{ width: '100%', marginBottom: 8, borderRadius: 13, overflow: 'hidden', backgroundColor: '#090B1B' }}>
+        <View style={{ marginBottom: 10, borderRadius: 13, overflow: 'hidden', backgroundColor: '#090B1B' }}>
           <LiveBetFeed game={gt} />
         </View>
         {/* Game stage */}
-        <View style={[styles.stage, { width: '100%', alignSelf: 'stretch' }]}>
+        <View style={styles.stage}>
           <LinearGradient 
           colors={['#080D22', '#11112B', '#071D2B']} 
            style={[
@@ -1756,7 +1741,6 @@ const cardStyle3 = useAnimatedStyle(() => ({
       style={{
         width: 222,
         height: 222,
-        transform: [{ scale: responsiveScale }],
         borderRadius: 111,
         backgroundColor: '#FFD700',
         padding: 7,
@@ -2537,7 +2521,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
                 {gt === 'number-king' && (
                   <View style={{ alignItems: 'center' }}>
-                    <Text style={[styles.bigNumber, { fontSize: Math.round(90 * responsiveScale) }]} testID="number-roll">{busy ? liveMult : (result?.result?.roll ?? '?')}</Text>
+                    <Text style={styles.bigNumber} testID="number-roll">{busy ? liveMult : (result?.result?.roll ?? '?')}</Text>
                     <Text style={{ color: '#fff', fontWeight: '700' }}>Your pick: {numberPick}</Text>
                   </View>
                 )}
@@ -2727,83 +2711,100 @@ const cardStyle3 = useAnimatedStyle(() => ({
 
         {error && <View style={styles.errorBox}><Ionicons name="alert-circle" size={18} color="#FF4D4F" /><Text style={styles.errorText}>{error}</Text></View>}
 
-        {/* Controls */}
+        {/* Compact responsive controls - shared by every game */}
         <View style={styles.controls}>
           {(!busy && !(isCrash && myLiveBetPlaced) && !(isDragonTiger && dtBetPlaced)) && (
-            <>
-              <Text style={styles.label}>Bet Amount (₹)</Text>
-              <TextInput
-                testID="game-bet"
-                style={inputStyle.base}
-                value={bet}
-                onChangeText={setBet}
-                keyboardType="number-pad"
-                editable={!busy}
-                placeholder="Enter bet amount"
-                placeholderTextColor="#8A91A8"
-              />
-            </>
+            <View style={{ marginBottom: 8 }}>
+              <Text style={[styles.label, { fontSize: 10, marginBottom: 5 }]}>Bet Amount (₹)</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <TextInput
+                  testID="game-bet"
+                  style={[inputStyle.base, { flex: 0.9, width: 0, minWidth: 0, height: 38, minHeight: 38, paddingVertical: 4, paddingHorizontal: 9, fontSize: 13 }]}
+                  value={bet}
+                  onChangeText={setBet}
+                  keyboardType="number-pad"
+                  editable={!busy}
+                  placeholder="Amount"
+                  placeholderTextColor="#8A91A8"
+                />
+                <View style={{ flex: 2.1, minWidth: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 4 }}>
+                  {[10, 50, 100, 500, 1000].map((v, i) => {
+                    const chipColors = ['#2ECA7F', '#5B8CFF', '#8B5CF6', '#FFB020', '#FF4D4F'];
+                    const isSelected = bet === String(v);
+                    return (
+                      <Pressable key={v} disabled={busy} onPress={() => setBet(String(v))}
+                        style={[styles.chip, { width: 32, height: 32, minWidth: 0, borderRadius: 16, borderWidth: 1.5, backgroundColor: chipColors[i] }, isSelected && { borderColor: '#FFD700', borderStyle: 'solid' }]}
+                        testID={`bet-${v}`}>
+                        <Text style={[styles.chipText, { fontSize: 9 }]}>{v >= 1000 ? `${v / 1000}K` : v}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            </View>
           )}
 
-          {/* Bet coins stay available before a round, hide after bet placement,
-              and return when the next round opens. */}
-          {!busy && !(isCrash && myLiveBetPlaced) && !(isDragonTiger && dtBetPlaced) && (
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, marginTop: 10 }}>
-              {[10, 50, 100, 500, 1000].map((v, i) => {
-                const chipColors = ['#2ECA7F', '#5B8CFF', '#8B5CF6', '#FFB020', '#FF4D4F'];
-                const isSelected = bet === String(v);
-                return (
-                  <Pressable
-                    key={v}
-                    disabled={busy}
-                    onPress={() => setBet(String(v))}
-                    style={[styles.chip, { backgroundColor: chipColors[i] }, isSelected && { borderColor: '#FFD700', borderStyle: 'solid' }]}
-                    testID={`bet-${v}`}
-                  >
-                    <Text style={styles.chipText}>{v >= 1000 ? `${v / 1000}K` : v}</Text>
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-          )}
-
+          {/* Game-specific controls remain unchanged in behavior. */}
           {(gt === 'crash' || gt === 'aviator') && (
-            <View style={{ marginTop: 12 }}>
-              <Text style={styles.label}>Auto Cash-Out (×)</Text>
-              <TextInput testID="cash-out" style={inputStyle.base} value={cashOut} onChangeText={setCashOut} keyboardType="decimal-pad" editable={!busy} />
+            <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 8, marginTop: 2 }}>
+              <View style={{ flex: 0.9, minWidth: 0 }}>
+                <Text style={[styles.label, { fontSize: 10, marginBottom: 5 }]}>Auto Cash-Out (×)</Text>
+                <TextInput testID="cash-out" style={[inputStyle.base, { height: 38, minHeight: 38, paddingVertical: 4, paddingHorizontal: 9, fontSize: 13 }]}
+                  value={cashOut} onChangeText={setCashOut} keyboardType="decimal-pad" editable={!busy} />
+              </View>
+              <View style={{ flex: 2.1, minWidth: 0 }}>
+                {isCrash && flying && myLiveBetPlaced ? (
+                  <Pressable testID="cash-out-btn" onPress={() => {
+                    if (!liveRoundId) return;
+                    api.liveCashout(liveRoundId).then((res: any) => {
+                      setBalance(res.balance);
+                      setMyLiveBetPlaced(false);
+                      setResult({ win: res.win, payout: res.payout || 0, result: {} });
+                      finishRound({ win: res.win }, res.win ? `CASHED @ ${res.multiplier}x` : `CRASHED @ ${(res.crash_point || 0).toFixed(2)}x`);
+                    }).catch((e: any) => setError(e.message || 'Cashout failed'));
+                  }} style={{ height: 38, borderRadius: 22, backgroundColor: '#20C997', alignItems: 'center', justifyContent: 'center' }}>
+                    <Text numberOfLines={1} adjustsFontSizeToFit style={{ color: '#fff', fontWeight: '900', fontSize: 12 }}>CASH OUT · {liveMult}x</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable testID="play-btn" onPress={play} disabled={busy}
+                    style={{ height: 38, borderRadius: 22, backgroundColor: busy ? '#777' : '#FF777D', alignItems: 'center', justifyContent: 'center', opacity: busy ? 0.65 : 1 }}>
+                    <Text numberOfLines={1} adjustsFontSizeToFit style={{ color: '#fff', fontWeight: '900', fontSize: 12 }}>{busy ? 'Launching…' : `Place Bet · ₹${bet || 0}`}</Text>
+                  </Pressable>
+                )}
+              </View>
             </View>
           )}
 
           {gt === 'dice' && (
-            <View style={{ marginTop: 12 }}>
-              <Text style={styles.label}>Prediction</Text>
+            <View style={{ marginTop: 5 }}>
+              <Text style={[styles.label, { fontSize: 10, marginBottom: 5 }]}>Prediction</Text>
               <View style={{ flexDirection: 'row', gap: 8 }}>
-                <Pressable testID="pick-under" disabled={busy} onPress={() => setPick('under')} style={[styles.pickBtn, pick === 'under' && styles.pickActive]}><Text style={[styles.pickText, pick === 'under' && { color: '#fff' }]}>Under {threshold}</Text></Pressable>
-                <Pressable testID="pick-over" disabled={busy} onPress={() => setPick('over')} style={[styles.pickBtn, pick === 'over' && styles.pickActive]}><Text style={[styles.pickText, pick === 'over' && { color: '#fff' }]}>Over {threshold}</Text></Pressable>
+                <Pressable testID="pick-under" disabled={busy} onPress={() => setPick('under')} style={[styles.pickBtn, { paddingVertical: 8 }, pick === 'under' && styles.pickActive]}><Text style={[styles.pickText, pick === 'under' && { color: '#fff' }]}>Under {threshold}</Text></Pressable>
+                <Pressable testID="pick-over" disabled={busy} onPress={() => setPick('over')} style={[styles.pickBtn, { paddingVertical: 8 }, pick === 'over' && styles.pickActive]}><Text style={[styles.pickText, pick === 'over' && { color: '#fff' }]}>Over {threshold}</Text></Pressable>
               </View>
-              <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
+              <View style={{ flexDirection: 'row', gap: 6, marginTop: 6 }}>
                 {[25, 50, 75].map(t => <Pressable key={t} disabled={busy} onPress={() => setThreshold(t)} style={[styles.chip, threshold === t && { borderColor: colors.brandPrimary, backgroundColor: colors.brandTertiary }]} testID={`th-${t}`}><Text style={styles.chipText}>{t}</Text></Pressable>)}
               </View>
             </View>
           )}
 
           {gt === 'andar-bahar' && (
-            <View style={{ marginTop: 12 }}>
-              <Text style={styles.label}>Pick a Side</Text>
+            <View style={{ marginTop: 5 }}>
+              <Text style={[styles.label, { fontSize: 10, marginBottom: 5 }]}>Pick a Side</Text>
               <View style={{ flexDirection: 'row', gap: 8 }}>
                 {(['andar', 'bahar'] as const).map(k => (
-                  <Pressable key={k} testID={`ab-${k}`} disabled={busy} onPress={() => setAbPick(k)} style={[styles.pickBtn, abPick === k && styles.pickActive]}><Text style={[styles.pickText, abPick === k && { color: '#fff' }]}>{k.toUpperCase()}</Text></Pressable>
+                  <Pressable key={k} testID={`ab-${k}`} disabled={busy} onPress={() => setAbPick(k)} style={[styles.pickBtn, { paddingVertical: 8 }, abPick === k && styles.pickActive]}><Text style={[styles.pickText, abPick === k && { color: '#fff' }]}>{k.toUpperCase()}</Text></Pressable>
                 ))}
               </View>
             </View>
           )}
 
           {gt === 'number-king' && (
-            <View style={{ marginTop: 12 }}>
-              <Text style={styles.label}>Pick a Number (0-9) · Payout 3x</Text>
+            <View style={{ marginTop: 5 }}>
+              <Text style={[styles.label, { fontSize: 10, marginBottom: 5 }]}>Pick a Number (0-9) · Payout 3x</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
                 {Array.from({ length: 10 }).map((_, n) => (
-                  <Pressable key={n} testID={`num-${n}`} disabled={busy} onPress={() => setNumberPick(n)} style={[styles.numBtn, numberPick === n && styles.numBtnA]}>
+                  <Pressable key={n} testID={`num-${n}`} disabled={busy} onPress={() => setNumberPick(n)} style={[styles.numBtn, { width: 34, height: 34 }, numberPick === n && styles.numBtnA]}>
                     <Text style={[styles.numTxt, numberPick === n && { color: '#fff' }]}>{n}</Text>
                   </Pressable>
                 ))}
@@ -2812,11 +2813,11 @@ const cardStyle3 = useAnimatedStyle(() => ({
           )}
 
           {gt === 'mines' && (
-            <View style={{ marginTop: 12 }}>
-              <Text style={styles.label}>Tiles to reveal (higher = bigger reward)</Text>
+            <View style={{ marginTop: 5 }}>
+              <Text style={[styles.label, { fontSize: 10, marginBottom: 5 }]}>Tiles to reveal (higher = bigger reward)</Text>
               <View style={{ flexDirection: 'row', gap: 8 }}>
                 {[1, 2, 3, 4, 5].map(n => (
-                  <Pressable key={n} testID={`picks-${n}`} disabled={busy} onPress={() => setMinePicks(n)} style={[styles.numBtn, minePicks === n && styles.numBtnA]}>
+                  <Pressable key={n} testID={`picks-${n}`} disabled={busy} onPress={() => setMinePicks(n)} style={[styles.numBtn, { width: 36, height: 36 }, minePicks === n && styles.numBtnA]}>
                     <Text style={[styles.numTxt, minePicks === n && { color: '#fff' }]}>{n}</Text>
                   </Pressable>
                 ))}
@@ -2824,32 +2825,20 @@ const cardStyle3 = useAnimatedStyle(() => ({
             </View>
           )}
 
-          <View style={{ height: 16 }} />
-          {isCrash && flying && myLiveBetPlaced ? (
-            <Pressable testID="cash-out-btn" onPress={() => {
-                if (!liveRoundId) return;
-                api.liveCashout(liveRoundId).then((res: any) => {
-                  setBalance(res.balance);
-    
-                  setMyLiveBetPlaced(false);
-                  setResult({ win: res.win, payout: res.payout || 0, result: {} });
-                  finishRound({ win: res.win }, res.win ? `CASHED @ ${res.multiplier}x` : `CRASHED @ ${(res.crash_point || 0).toFixed(2)}x`);
-                }).catch((e: any) => setError(e.message || 'Cashout failed'));
-              }} style={styles.cashOutBtn}>
-              <Ionicons name="hand-left" size={20} color="#fff" />
-              <Text style={styles.cashOutText}>CASH OUT · {liveMult}x</Text>
-              <Text style={styles.cashOutSub}>₹{((parseFloat(bet) || 0) * parseFloat(liveMult)).toFixed(0)}</Text>
-            </Pressable>
-          ) : (
-            <PrimaryButton
-              testID="play-btn"
-              label={isDragonTiger && dtBetSubmitting ? 'Placing Bet…' : busy ? (isCrash ? 'Launching…' : 'Playing…') : `Place Bet · ₹${bet || 0}`}
-              onPress={play}
-              loading={(busy && !isCrash) || (isDragonTiger && dtBetSubmitting)}
-              disabled={busy || (isDragonTiger && (dtBetSubmitting || dtBetPlaced || dtStatus !== 'waiting'))}
-            />
+          {/* Non-crash games keep their original play/cashout action and logic. */}
+          {!isCrash && (
+            <View style={{ marginTop: 8 }}>
+              {isDragonTiger && dtBetPlaced ? null : (
+                <PrimaryButton
+                  testID="play-btn"
+                  label={isDragonTiger && dtBetSubmitting ? 'Placing Bet…' : busy ? 'Playing…' : `Place Bet · ₹${bet || 0}`}
+                  onPress={play}
+                  loading={(busy && !isCrash) || (isDragonTiger && dtBetSubmitting)}
+                  disabled={busy || (isDragonTiger && (dtBetSubmitting || dtBetPlaced || dtStatus !== 'waiting'))}
+                />
+              )}
+            </View>
           )}
-        </View>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -2898,8 +2887,8 @@ function ComingSoon({ router }: any) {
 const styles = StyleSheet.create({
   h: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: spacing.lg, minHeight: 64 },
   title: { color: '#FFFFFF', fontSize: 19, fontWeight: '900', letterSpacing: 1.1, textShadowColor: '#00E5FF', textShadowRadius: 10 },
-  stage: { maxWidth: '100%', borderRadius: 18, marginBottom: spacing.md, borderWidth: 1.5, borderColor: '#00E5FF', overflow: 'hidden', backgroundColor: '#090D20', shadowColor: '#00D9FF', shadowOpacity: 0.55, shadowRadius: 16, shadowOffset: { width: 0, height: 0 }, elevation: 12 },
-  stageBg: { width: '100%', minHeight: 230, alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' },
+  stage: { borderRadius: 22, marginBottom: spacing.md, borderWidth: 1.5, borderColor: '#00E5FF', overflow: 'hidden', backgroundColor: '#090D20', shadowColor: '#00D9FF', shadowOpacity: 0.55, shadowRadius: 16, shadowOffset: { width: 0, height: 0 }, elevation: 12 },
+  stageBg: { minHeight: 180, alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden' },
   display: { position: 'absolute', top: 16, right: 16, color: '#fff', fontWeight: '800', fontSize: 16, letterSpacing: 0.5 },
   statusBadge: { position: 'absolute', top: 16, left: 16, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.4)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999 },
   statusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#2ECA7F' },
@@ -2979,15 +2968,12 @@ aviatorWaitingSub: {
   zIndex: 0,
 },
 crashAviatorStage: {
-  // Match the reference layout: wide game canvas with a controlled portrait height.
-  // At ~340dp content width this gives ~300dp height, avoiding an oversized canvas.
-  aspectRatio: 1.12,
-  minHeight: 0,
+  minHeight: 428,
 },
   
   tpTable: {
   width: '100%',
-  minHeight: 300,
+  minHeight: 420,
   borderRadius: 20,
   backgroundColor: '#07552F',
   borderWidth: 2,
@@ -3369,10 +3355,8 @@ abWinnerSub: {
   plinkoSlot: { width: 24, height: 26, borderRadius: 6, backgroundColor: 'rgba(255,255,255,0.15)', alignItems: 'center', justifyContent: 'center' },
   plinkoBoard: {
   width: '100%',
-  height: 440,
-  maxWidth: '100%',
-  alignSelf: 'center',
-  borderRadius: 20,
+  height: 465,
+  borderRadius: 24,
   backgroundColor: '#071020',
   borderWidth: 1,
   borderColor: '#38D9FF',
@@ -3446,7 +3430,7 @@ plinkoDropArrow: {
 
 plinkoPegArea: {
   width: '100%',
-  height: 204,
+  height: 218,
   alignItems: 'center',
   justifyContent: 'flex-start',
   position: 'relative',
@@ -3460,9 +3444,9 @@ plinkoPegRow: {
 },
 
 plinkoPeg: {
-  width: 7,
-  height: 7,
-  borderRadius: 3.5,
+  width: 9,
+  height: 9,
+  borderRadius: 4.5,
   backgroundColor: '#56E6FF',
   borderWidth: 1,
   borderColor: '#F4FEFF',
@@ -3630,14 +3614,14 @@ plinkoFinalResultValue: {
   historyRow: { flexDirection: 'row', gap: 4, flexWrap: 'wrap' },
   histChip: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: '#fff' },
   histText: { fontWeight: '800', fontSize: 13, color: '#fff' },
-  resultBox: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 14, borderRadius: radius.lg, marginBottom: spacing.md },
-  resultText: { fontSize: 15, fontWeight: '800' },
+  resultBox: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 12, borderRadius: radius.lg, marginBottom: spacing.md },
+  resultText: { fontSize: 12, fontWeight: '800' },
   errorBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FDECEC', padding: 12, borderRadius: radius.md, marginBottom: spacing.md },
   errorText: { color: '#FF4D4F', fontWeight: '700', flex: 1 },
-  controls: { backgroundColor: '#101326', borderRadius: 20, padding: spacing.lg, borderWidth: 1, borderColor: 'rgba(139,92,255,0.48)', shadowColor: '#00D9FF', shadowOpacity: 0.18, shadowRadius: 12, elevation: 5 },
-  label: { fontSize: 12, fontWeight: '900', color: '#AAB5D6', marginBottom: 8, letterSpacing: 0.7 },
-  chip: { width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', borderWidth: 3, borderColor: '#fff', borderStyle: 'dashed', ...shadows.strong },
-  chipText: { fontWeight: '800', color: colors.onSurface, fontSize: 12 },
+  controls: { backgroundColor: '#101326', borderRadius: 14, padding: 10, marginTop: 6, marginBottom: 4, borderWidth: 1, borderColor: 'rgba(139,92,255,0.48)', shadowColor: '#00D9FF', shadowOpacity: 0.18, shadowRadius: 12, elevation: 5 },
+  label: { fontSize: 11, fontWeight: '900', color: '#AAB5D6', marginBottom: 5, letterSpacing: 0.5 },
+  chip: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff', borderStyle: 'dashed', ...shadows.strong },
+  chipText: { fontWeight: '900', color: colors.onSurface, fontSize: 12 },
   pickBtn: { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 12, backgroundColor: colors.surfaceSecondary, borderWidth: 1, borderColor: colors.border },
   pickActive: { backgroundColor: colors.brandPrimary, borderColor: colors.brandPrimary },
   pickText: { fontWeight: '800', color: colors.onSurface },
