@@ -87,10 +87,7 @@ function Particle({ index, color }: { index: number; color: string }) {
 }
 
 export default function GameScreen() {
-  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const [gameContentHeight, setGameContentHeight] = useState(0);
-  const availableGameHeight = Math.max(300, screenHeight - 155);
-  const fitScale = gameContentHeight > 0 ? Math.min(1, availableGameHeight / gameContentHeight) : 1;
+  const { width: screenWidth } = useWindowDimensions();
   const responsiveScale = Math.min(1, Math.max(0.78, (screenWidth - 24) / 360));
   const router = useRouter();
   const { type } = useLocalSearchParams<{ type: string }>();
@@ -1352,19 +1349,8 @@ const cardStyle3 = useAnimatedStyle(() => ({
         </SafeAreaView>
       </LinearGradient>
 
-      <View style={{ flex: 1, width: '100%', backgroundColor: '#070914', alignItems: 'center', justifyContent: 'flex-start', overflow: 'hidden' }}>
-        <View style={{
-          width: '100%', alignItems: 'center', overflow: 'visible',
-          transform: [{ scaleX: 1 }, { scaleY: fitScale }],
-          height: gameContentHeight > 0 ? gameContentHeight * fitScale : undefined,
-        }}>
-        <View
-          onLayout={(event) => {
-            const measured = event.nativeEvent.layout.height;
-            if (measured > 0 && Math.abs(measured - gameContentHeight) > 2) setGameContentHeight(measured);
-          }}
-          style={{ width: '100%', paddingHorizontal: 10, paddingTop: 6, paddingBottom: 10 }}
-        >
+      <ScrollView style={{ flex: 1, width: '100%', backgroundColor: '#070914' }} contentContainerStyle={{ width: '100%', paddingHorizontal: 10, paddingTop: 6, paddingBottom: 10 }} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+        <View style={{ width: '100%', alignItems: 'center' }}>
         {/* Live wins feed: keep the container neutral; RGB styling belongs on each name chip inside LiveBetFeed. */}
         <View style={{ marginBottom: 10, borderRadius: 13, overflow: 'hidden', backgroundColor: '#090B1B' }}>
           <LiveBetFeed game={gt} />
@@ -2853,8 +2839,7 @@ const cardStyle3 = useAnimatedStyle(() => ({
           )}
         </View>
         </View>
-        </View>
-      </View>
+      </ScrollView>
     </KeyboardAvoidingView>
   );
 }
@@ -2982,12 +2967,12 @@ aviatorWaitingSub: {
   zIndex: 0,
 },
 crashAviatorStage: {
-  minHeight: 428,
+  minHeight: 270,
 },
   
   tpTable: {
   width: '100%',
-  minHeight: 420,
+  minHeight: 320,
   borderRadius: 20,
   backgroundColor: '#07552F',
   borderWidth: 2,
